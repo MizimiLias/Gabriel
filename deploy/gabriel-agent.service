@@ -1,0 +1,29 @@
+[Unit]
+Description=Gabriel Agent Chat API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cacc
+Group=cacc
+WorkingDirectory=/opt/gabriel-agent
+EnvironmentFile=/etc/default/gabriel-agent
+ExecStart=/opt/gabriel-agent/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8087 --workers 1 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGINT
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gabriel-agent
+
+[Install]
+WantedBy=multi-user.target
+
