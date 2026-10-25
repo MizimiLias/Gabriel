@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     chat_context_message_limit: int = Field(default=20, ge=1, le=200)
     chat_system_prompt: str = DEFAULT_SYSTEM_PROMPT
 
+    qq_bot_enabled: bool = False
+    qq_bot_app_id: str | None = None
+    qq_bot_app_secret: SecretStr | None = None
+
     embedding_base_url: str | None = None
     embedding_api_key: SecretStr | None = None
     embedding_model: str | None = None
@@ -56,21 +60,33 @@ class Settings(BaseSettings):
     rag_vector_distance: Literal["cosine", "l2", "inner_product"] = "cosine"
 
     @model_validator(mode="after")
-    def validate_rag_settings(self) -> Settings:
-        if not self.rag_enabled:
-            return self
+    def validate_optional_integrations(self) -> Settings:
+        if self.rag_enabled:
+            missing_embeddings = [
+                name
+                for name, value in (
+                    ("EMBEDDING_BASE_URL", self.embedding_base_url),
+                    ("EMBEDDING_API_KEY", self.embedding_api_key),
+                    ("EMBEDDING_MODEL", self.embedding_model),
+                )
+                if value is None or (isinstance(value, SecretStr) and not value.get_secret_value())
+            ]
+            if missing_embeddings:
+                raise ValueError(f"RAG_ENABLED=true requires: {', '.join(missing_embeddings)}")
 
-        missing = [
-            name
-            for name, value in (
-                ("EMBEDDING_BASE_URL", self.embedding_base_url),
-                ("EMBEDDING_API_KEY", self.embedding_api_key),
-                ("EMBEDDING_MODEL", self.embedding_model),
-            )
-            if value is None or (isinstance(value, SecretStr) and not value.get_secret_value())
-        ]
-        if missing:
-            raise ValueError(f"RAG_ENABLED=true requires: {', '.join(missing)}")
+        if self.qq_bot_enabled:
+            missing_qq = [
+                name
+                for name, value in (
+                    ("QQ_BOT_APP_ID", self.qq_bot_app_id),
+                    ("QQ_BOT_APP_SECRET", self.qq_bot_app_secret),
+                )
+                if value is None
+                or (isinstance(value, str) and not value.strip())
+                or (isinstance(value, SecretStr) and not value.get_secret_value())
+            ]
+            if missing_qq:
+                raise ValueError(f"QQ_BOT_ENABLED=true requires: {', '.join(missing_qq)}")
         return self
 
     @property

@@ -1,15 +1,31 @@
 """Persistence operations for chat sessions and messages."""
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import cast
 from uuid import UUID
 
-from sqlalchemy import delete, exists, select
+from sqlalchemy import delete, exists, func, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.entities.chat_message import ChatMessage
-from app.entities.chat_session import ChatSession
+from app.entities.chat_session import ChatSession, SessionSource
+from app.entities.inbound_event import InboundEvent
 from app.exceptions.chat import ChatSessionNotFoundError
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSessionSummaryRow:
+    """Database projection used to build the session sidebar."""
+
+    session_id: UUID
+    title: str
+    source: SessionSource
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+    last_message_preview: str
 
 
 class ChatRepository:
@@ -30,15 +46,25 @@ class ChatRepository:
         result = await self._session.scalars(statement)
         return list(reversed(result.all()))
 
-    async def get_history(self, session_id: UUID, limit: int) -> list[ChatMessage]:
-        """Return recent history, raising when the session is unknown."""
+    async def get_history(self, session_id: UUID, limit: int) -> tuple[str, list[ChatMessage]]:
+        """Return a session title and recent history, raising when unknown."""
 
-        session_exists = await self._session.scalar(
-            select(exists().where(ChatSession.session_id == session_id))
+        title = await self._session.scalar(
+            select(ChatSession.title).where(ChatSession.session_id == session_id)
         )
-        if not session_exists:
+        if title is None:
             raise ChatSessionNotFoundError("The requested chat session does not exist.")
-        return await self.get_recent_messages(session_id, limit)
+        return title, await self.get_recent_messages(session_id, limit)
+
+    async def get_session_title(self, session_id: UUID) -> str | None:
+        """Return a session title, or None when the session does not exist."""
+
+        return cast(
+            str | None,
+            await self._session.scalar(
+                select(ChatSession.title).where(ChatSession.session_id == session_id)
+            ),
+        )
 
     async def session_exists(self, session_id: UUID) -> bool:
         """Return whether a session exists."""
@@ -48,6 +74,52 @@ class ChatRepository:
         )
         return bool(value)
 
+    async def list_sessions(
+        self, source: SessionSource = SessionSource.WEB
+    ) -> list[ChatSessionSummaryRow]:
+        """Return session summaries for one source ordered by recent activity."""
+
+        message_count = (
+            select(func.count(ChatMessage.id))
+            .where(ChatMessage.session_id == ChatSession.session_id)
+            .correlate(ChatSession)
+            .scalar_subquery()
+        )
+        latest_message = (
+            select(ChatMessage.content)
+            .where(ChatMessage.session_id == ChatSession.session_id)
+            .order_by(ChatMessage.sequence.desc())
+            .limit(1)
+            .correlate(ChatSession)
+            .scalar_subquery()
+        )
+        statement = (
+            select(
+                ChatSession.session_id,
+                ChatSession.title,
+                ChatSession.source,
+                ChatSession.created_at,
+                ChatSession.updated_at,
+                message_count.label("message_count"),
+                func.coalesce(func.left(latest_message, 160), "").label("last_message_preview"),
+            )
+            .where(ChatSession.source == source.value)
+            .order_by(ChatSession.updated_at.desc())
+        )
+        rows = (await self._session.execute(statement)).all()
+        return [
+            ChatSessionSummaryRow(
+                session_id=row.session_id,
+                title=row.title,
+                source=SessionSource(row.source),
+                created_at=row.created_at,
+                updated_at=row.updated_at,
+                message_count=row.message_count,
+                last_message_preview=row.last_message_preview,
+            )
+            for row in rows
+        ]
+
     async def save_exchange(
         self,
         *,
@@ -55,13 +127,23 @@ class ChatRepository:
         user_content: str,
         assistant_content: str,
         assistant_message_id: UUID,
+        title: str = "New chat",
+        source: SessionSource = SessionSource.WEB,
+        external_key: str | None = None,
     ) -> ChatMessage:
         """Atomically create the session when needed and store one completed exchange."""
 
         now = datetime.now(UTC)
         upsert_session = (
             postgresql_insert(ChatSession)
-            .values(session_id=session_id, created_at=now, updated_at=now)
+            .values(
+                session_id=session_id,
+                title=title,
+                source=source.value,
+                external_key=external_key,
+                created_at=now,
+                updated_at=now,
+            )
             .on_conflict_do_update(
                 index_elements=[ChatSession.session_id],
                 set_={"updated_at": now},
@@ -91,6 +173,37 @@ class ChatRepository:
             raise
         return assistant_message
 
+    async def update_session_title(self, session_id: UUID, title: str) -> ChatSessionSummaryRow:
+        """Rename one session and return its updated summary."""
+
+        now = datetime.now(UTC)
+        statement = (
+            update(ChatSession)
+            .where(ChatSession.session_id == session_id)
+            .values(title=title, updated_at=now)
+            .returning(ChatSession)
+        )
+        try:
+            result = await self._session.scalar(statement)
+            if result is None:
+                raise ChatSessionNotFoundError("The requested chat session does not exist.")
+
+            row = next(
+                (
+                    session
+                    for session in await self.list_sessions(SessionSource(result.source))
+                    if session.session_id == session_id
+                ),
+                None,
+            )
+            if row is None:
+                raise ChatSessionNotFoundError("The requested chat session does not exist.")
+            await self._session.commit()
+            return row
+        except Exception:
+            await self._session.rollback()
+            raise
+
     async def delete_session(self, session_id: UUID) -> None:
         """Delete a session and all messages through the database cascade."""
 
@@ -98,6 +211,80 @@ class ChatRepository:
             await self._session.execute(
                 delete(ChatSession).where(ChatSession.session_id == session_id)
             )
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+
+
+class InboundEventRepository:
+    """Database gateway for external event idempotency claims."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def claim(self, source: SessionSource, external_event_id: str) -> bool:
+        """Claim an event, returning false when it was already received."""
+
+        now = datetime.now(UTC)
+        statement = (
+            postgresql_insert(InboundEvent)
+            .values(
+                source=source.value,
+                external_event_id=external_event_id,
+                status="processing",
+                received_at=now,
+                updated_at=now,
+            )
+            .on_conflict_do_nothing(
+                index_elements=[InboundEvent.source, InboundEvent.external_event_id]
+            )
+            .returning(InboundEvent.external_event_id)
+        )
+        try:
+            claimed = await self._session.scalar(statement)
+            await self._session.commit()
+        except Exception:
+            await self._session.rollback()
+            raise
+        return claimed is not None
+
+    async def mark_completed(self, source: SessionSource, external_event_id: str) -> None:
+        """Record successful processing of a claimed event."""
+
+        await self._update_status(source, external_event_id, status="completed")
+
+    async def mark_failed(
+        self, source: SessionSource, external_event_id: str, error_type: str
+    ) -> None:
+        """Record failed processing without allowing an automatic duplicate retry."""
+
+        await self._update_status(
+            source,
+            external_event_id,
+            status="failed",
+            error_type=error_type,
+        )
+
+    async def _update_status(
+        self,
+        source: SessionSource,
+        external_event_id: str,
+        *,
+        status: str,
+        error_type: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        statement = (
+            update(InboundEvent)
+            .where(
+                InboundEvent.source == source.value,
+                InboundEvent.external_event_id == external_event_id,
+            )
+            .values(status=status, processed_at=now, updated_at=now, error_type=error_type)
+        )
+        try:
+            await self._session.execute(statement)
             await self._session.commit()
         except Exception:
             await self._session.rollback()

@@ -1,10 +1,11 @@
-"""Chat service memory and persistence tests."""
+"""Chat service memory, title, and persistence tests."""
 
 from typing import cast
 from uuid import uuid4
 
 import pytest
 
+from app.entities.chat_session import SessionSource
 from app.repositories.chat_repository import ChatRepository
 from app.services.chat_service import ChatService, StreamDone, StreamStart, StreamToken
 from tests.support import FakeChatModel, FakeChatRepository, make_settings
@@ -59,6 +60,32 @@ async def test_context_limit_keeps_only_recent_messages() -> None:
     ]
 
 
+async def test_first_exchange_generates_title_once() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel(title_response="Ada's name")
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    reply = await service.send_message(session_id, "My name is Ada")
+    assert reply.title == "Ada's name"
+    assert repository.titles[session_id] == "Ada's name"
+
+    model.title_response = "A different title"
+    await service.send_message(session_id, "What is my name?")
+    assert repository.titles[session_id] == "Ada's name"
+
+
+async def test_title_generation_failure_uses_first_message() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel(fail_title=True)
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    reply = await service.send_message(session_id, "  Plan a quiet weekend  ")
+    assert reply.title == "Plan a quiet weekend"
+    assert len(repository.messages[session_id]) == 2
+
+
 async def test_stream_persists_only_after_completion() -> None:
     repository = FakeChatRepository()
     model = FakeChatModel(chunks=["Hello", " world"])
@@ -73,6 +100,7 @@ async def test_stream_persists_only_after_completion() -> None:
         " world",
     ]
     assert isinstance(events[-1], StreamDone)
+    assert events[-1].title == "Test conversation"
     assert len(repository.messages[session_id]) == 2
 
 
@@ -86,3 +114,19 @@ async def test_stream_failure_does_not_persist() -> None:
         _ = [event async for event in service.stream_message(session_id, "Hi")]
 
     assert session_id not in repository.messages
+
+
+async def test_external_session_identity_is_persisted() -> None:
+    repository = FakeChatRepository()
+    service = build_service(repository=repository, model=FakeChatModel())
+    session_id = uuid4()
+
+    await service.send_message(
+        session_id,
+        "hello",
+        source=SessionSource.QQ_C2C,
+        external_key="app:user",
+    )
+
+    assert repository.sources[session_id] == SessionSource.QQ_C2C
+    assert repository.external_keys[session_id] == "app:user"

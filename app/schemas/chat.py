@@ -6,6 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.entities.chat_session import SessionSource
+
 
 class ChatRequest(BaseModel):
     """Incoming message for both JSON and SSE chat endpoints."""
@@ -33,6 +35,7 @@ class ChatResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: UUID
+    title: str
     message: ChatMessageResponse
 
 
@@ -42,7 +45,38 @@ class ChatHistoryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: UUID
+    title: str
     messages: list[ChatMessageResponse]
+
+
+class ChatSessionSummary(BaseModel):
+    """A session row used by the conversation sidebar."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: UUID
+    title: str
+    source: SessionSource
+    created_at: datetime
+    updated_at: datetime
+    message_count: int
+    last_message_preview: str
+
+
+class ChatSessionListResponse(BaseModel):
+    """All sessions, ordered by most recent activity."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[ChatSessionSummary]
+
+
+class ChatSessionUpdateRequest(BaseModel):
+    """Editable session metadata."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: str = Field(min_length=1, max_length=80)
 
 
 class StreamStartEvent(BaseModel):
@@ -62,6 +96,14 @@ class StreamTokenEvent(BaseModel):
     delta: str
 
 
+class StreamReasoningEvent(BaseModel):
+    """One reasoning/thinking fragment (never persisted)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    delta: str
+
+
 class StreamDoneEvent(BaseModel):
     """SSE event emitted after the completed exchange is persisted."""
 
@@ -69,10 +111,13 @@ class StreamDoneEvent(BaseModel):
 
     session_id: UUID
     message_id: UUID
+    title: str
     created_at: datetime
 
 
 class HealthResponse(BaseModel):
     """Service health response."""
+
+    model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"]

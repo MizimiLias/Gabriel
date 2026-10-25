@@ -11,18 +11,30 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 
 from app.configs.dependencies import get_chat_service, get_request_id
 from app.entities.chat_message import ChatMessage
+from app.entities.chat_session import SessionSource
 from app.exceptions.chat import ChatUpstreamError
+from app.repositories.chat_repository import ChatSessionSummaryRow
 from app.schemas.chat import (
     ChatHistoryResponse,
     ChatMessageResponse,
     ChatRequest,
     ChatResponse,
+    ChatSessionListResponse,
+    ChatSessionSummary,
+    ChatSessionUpdateRequest,
     StreamDoneEvent,
+    StreamReasoningEvent,
     StreamStartEvent,
     StreamTokenEvent,
 )
 from app.schemas.error import SSEErrorEvent
-from app.services.chat_service import ChatService, StreamDone, StreamStart, StreamToken
+from app.services.chat_service import (
+    ChatService,
+    StreamDone,
+    StreamReasoning,
+    StreamStart,
+    StreamToken,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -40,6 +52,18 @@ def _message_response(message: ChatMessage) -> ChatMessageResponse:
     )
 
 
+def _session_summary(row: ChatSessionSummaryRow) -> ChatSessionSummary:
+    return ChatSessionSummary(
+        session_id=row.session_id,
+        title=row.title,
+        source=row.source,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+        message_count=row.message_count,
+        last_message_preview=row.last_message_preview,
+    )
+
+
 @router.post("", response_model=ChatResponse)
 async def send_message(
     payload: ChatRequest,
@@ -47,8 +71,12 @@ async def send_message(
 ) -> ChatResponse:
     """Generate one complete assistant response."""
 
-    message = await service.send_message(payload.session_id, payload.message)
-    return ChatResponse(session_id=payload.session_id, message=_message_response(message))
+    reply = await service.send_message(payload.session_id, payload.message)
+    return ChatResponse(
+        session_id=payload.session_id,
+        title=reply.title,
+        message=_message_response(reply.message),
+    )
 
 
 @router.post("/stream")
@@ -75,10 +103,16 @@ async def stream_message(
                         event="token",
                         data=StreamTokenEvent(delta=event.delta).model_dump_json(),
                     )
+                elif isinstance(event, StreamReasoning):
+                    yield ServerSentEvent(
+                        event="reasoning",
+                        data=StreamReasoningEvent(delta=event.delta).model_dump_json(),
+                    )
                 elif isinstance(event, StreamDone):
                     done = StreamDoneEvent(
                         session_id=event.session_id,
                         message_id=event.message_id,
+                        title=event.title,
                         created_at=event.created_at,
                     )
                     yield ServerSentEvent(event="done", data=done.model_dump_json())
@@ -111,6 +145,17 @@ async def stream_message(
     )
 
 
+@router.get("/sessions", response_model=ChatSessionListResponse)
+async def list_sessions(
+    service: Annotated[ChatService, Depends(get_chat_service)],
+    source: Annotated[SessionSource, Query()] = SessionSource.WEB,
+) -> ChatSessionListResponse:
+    """Return sessions for one source ordered by recent activity."""
+
+    sessions = await service.list_sessions(source)
+    return ChatSessionListResponse(items=[_session_summary(row) for row in sessions])
+
+
 @router.get("/sessions/{session_id}/messages", response_model=ChatHistoryResponse)
 async def get_history(
     session_id: Annotated[uuid.UUID, Path()],
@@ -119,11 +164,24 @@ async def get_history(
 ) -> ChatHistoryResponse:
     """Return recent messages for one session."""
 
-    messages = await service.get_history(session_id, limit)
+    title, messages = await service.get_history(session_id, limit)
     return ChatHistoryResponse(
         session_id=session_id,
+        title=title,
         messages=[_message_response(message) for message in messages],
     )
+
+
+@router.patch("/sessions/{session_id}", response_model=ChatSessionSummary)
+async def rename_session(
+    session_id: Annotated[uuid.UUID, Path()],
+    payload: ChatSessionUpdateRequest,
+    service: Annotated[ChatService, Depends(get_chat_service)],
+) -> ChatSessionSummary:
+    """Rename an existing session."""
+
+    updated = await service.rename_session(session_id, payload.title)
+    return _session_summary(updated)
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

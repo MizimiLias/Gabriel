@@ -12,6 +12,7 @@ dependencies = [
     "langchain-openai>=1.0,<2",
     "pydantic>=2.12,<3",
     "pydantic-settings>=2.12,<3",
+    "qq-botpy==1.2.1",
     "sqlalchemy[asyncio]>=2.0.44,<2.1",
     "sse-starlette>=3.0,<4",
     "structlog>=25.4,<26",
@@ -43,6 +44,14 @@ strict = true
 warn_unused_ignores = true
 plugins = ["pydantic.mypy"]
 exclude = ["^alembic/"]
+
+[[tool.mypy.overrides]]
+module = ["botpy", "botpy.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["app.integrations.qq.connector"]
+disallow_subclassing_any = false
 
 [tool.pytest.ini_options]
 addopts = "-q"

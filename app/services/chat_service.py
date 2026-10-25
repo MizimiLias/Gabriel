@@ -1,6 +1,7 @@
 """Chat orchestration and LangChain message history handling."""
 
 import asyncio
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -12,10 +13,15 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 
 from app.configs.settings import Settings
 from app.entities.chat_message import ChatMessage
+from app.entities.chat_session import SessionSource
 from app.exceptions.chat import ChatUpstreamError
-from app.repositories.chat_repository import ChatRepository
+from app.prompts import TITLE_SYSTEM_PROMPT
+from app.repositories.chat_repository import ChatRepository, ChatSessionSummaryRow
 
 logger = structlog.get_logger(__name__)
+
+_MAX_TITLE_LENGTH = 80
+_TITLE_CONTEXT_LIMIT = 3_000
 
 _session_locks: dict[UUID, asyncio.Lock] = {}
 _locks_guard = asyncio.Lock()
@@ -42,15 +48,69 @@ class StreamToken:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamReasoning:
+    """Internal reasoning/thinking fragment (never persisted)."""
+
+    delta: str
+
+
+@dataclass(frozen=True, slots=True)
 class StreamDone:
     """Internal stream completion marker."""
 
     session_id: UUID
     message_id: UUID
+    title: str
     created_at: datetime
 
 
-type StreamEvent = StreamStart | StreamToken | StreamDone
+@dataclass(frozen=True, slots=True)
+class ChatReply:
+    """A persisted assistant reply and its session title."""
+
+    message: ChatMessage
+    title: str
+
+
+type StreamEvent = StreamStart | StreamToken | StreamReasoning | StreamDone
+
+
+def _extract_reasoning_delta(chunk: object) -> str:
+    """Extract one reasoning_content fragment from a streamed chunk."""
+
+    candidates: list[object] = []
+    additional = getattr(chunk, "additional_kwargs", None)
+    if isinstance(additional, dict):
+        candidates.append(additional.get("reasoning_content"))
+        candidates.append(additional.get("reasoning"))
+    metadata = getattr(chunk, "response_metadata", None)
+    if isinstance(metadata, dict):
+        candidates.append(metadata.get("reasoning_content"))
+        candidates.append(metadata.get("reasoning"))
+    # Some OpenAI-compatible gateways expose it as a direct attribute.
+    candidates.append(getattr(chunk, "reasoning_content", None))
+
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            return candidate
+        if isinstance(candidate, list):
+            parts = [part for part in candidate if isinstance(part, str) and part]
+            if parts:
+                return "".join(parts)
+    return ""
+
+
+def _normalise_title(value: str) -> str:
+    first_line = value.strip().splitlines()[0] if value.strip() else ""
+    first_line = re.sub(r"^\s*(?:title|标题)\s*[:\uff1a]\s*", "", first_line, flags=re.I)
+    first_line = re.sub(r"\s+", " ", first_line).strip(" \t\"'\u201c\u201d\u2018\u2019")
+    if len(first_line) <= _MAX_TITLE_LENGTH:
+        return first_line
+    return f"{first_line[: _MAX_TITLE_LENGTH - 1].rstrip()}…"
+
+
+def _fallback_title(message: str) -> str:
+    return _normalise_title(message) or "New chat"
 
 
 class ChatService:
@@ -66,31 +126,52 @@ class ChatService:
         self._model = model
         self._settings = settings
 
-    async def send_message(self, session_id: UUID, message: str) -> ChatMessage:
+    async def send_message(
+        self,
+        session_id: UUID,
+        message: str,
+        *,
+        source: SessionSource = SessionSource.WEB,
+        external_key: str | None = None,
+    ) -> ChatReply:
         """Generate one complete response and persist the successful exchange."""
 
         async with await _get_session_lock(session_id):
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
             )
+            existing_title = await self._repository.get_session_title(session_id)
             response = await self._invoke(self._build_messages(history, message))
             if not response:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
-            return await self._repository.save_exchange(
+            title = existing_title or await self._generate_title(message, response)
+            stored_message = await self._repository.save_exchange(
                 session_id=session_id,
                 user_content=message,
                 assistant_content=response,
                 assistant_message_id=uuid4(),
+                title=title,
+                source=source,
+                external_key=external_key,
             )
+            return ChatReply(message=stored_message, title=title)
 
-    async def stream_message(self, session_id: UUID, message: str) -> AsyncIterator[StreamEvent]:
+    async def stream_message(
+        self,
+        session_id: UUID,
+        message: str,
+        *,
+        source: SessionSource = SessionSource.WEB,
+        external_key: str | None = None,
+    ) -> AsyncIterator[StreamEvent]:
         """Generate one response as text fragments and persist only on completion."""
 
         async with await _get_session_lock(session_id):
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
             )
+            existing_title = await self._repository.get_session_title(session_id)
             messages = self._build_messages(history, message)
             assistant_message_id = uuid4()
             fragments: list[str] = []
@@ -98,6 +179,9 @@ class ChatService:
 
             try:
                 async for chunk in self._model.astream(messages):
+                    reasoning = _extract_reasoning_delta(chunk)
+                    if reasoning:
+                        yield StreamReasoning(delta=reasoning)
                     text = chunk.text
                     if text:
                         fragments.append(text)
@@ -119,22 +203,39 @@ class ChatService:
             if not content:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
+            title = existing_title or await self._generate_title(message, content)
             stored_message = await self._repository.save_exchange(
                 session_id=session_id,
                 user_content=message,
                 assistant_content=content,
                 assistant_message_id=assistant_message_id,
+                title=title,
+                source=source,
+                external_key=external_key,
             )
             yield StreamDone(
                 session_id=session_id,
                 message_id=stored_message.id,
+                title=title,
                 created_at=stored_message.created_at,
             )
 
-    async def get_history(self, session_id: UUID, limit: int) -> list[ChatMessage]:
-        """Return persisted history for an existing session."""
+    async def get_history(self, session_id: UUID, limit: int) -> tuple[str, list[ChatMessage]]:
+        """Return the title and persisted history for an existing session."""
 
         return await self._repository.get_history(session_id, limit)
+
+    async def list_sessions(
+        self, source: SessionSource = SessionSource.WEB
+    ) -> list[ChatSessionSummaryRow]:
+        """Return sessions for one source ordered by recent activity."""
+
+        return await self._repository.list_sessions(source)
+
+    async def rename_session(self, session_id: UUID, title: str) -> ChatSessionSummaryRow:
+        """Rename a session after validating that it exists."""
+
+        return await self._repository.update_session_title(session_id, _normalise_title(title))
 
     async def delete_session(self, session_id: UUID) -> None:
         """Delete a session if it exists."""
@@ -150,6 +251,30 @@ class ChatService:
             logger.warning("chat_upstream_failed", error_type=type(exc).__name__)
             raise ChatUpstreamError("The language model could not complete the response.") from exc
         return response.text
+
+    async def _generate_title(self, user_content: str, assistant_content: str) -> str:
+        fallback = _fallback_title(user_content)
+        title_messages = [
+            SystemMessage(content=TITLE_SYSTEM_PROMPT),
+            HumanMessage(
+                content=(
+                    "Create a title for this first exchange.\n\n"
+                    f"User:\n{user_content[:_TITLE_CONTEXT_LIMIT]}\n\n"
+                    f"Assistant:\n{assistant_content[:_TITLE_CONTEXT_LIMIT]}"
+                )
+            ),
+        ]
+        try:
+            response = await self._model.ainvoke(title_messages)
+            return _normalise_title(response.text) or fallback
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "chat_title_generation_failed",
+                error_type=type(exc).__name__,
+            )
+            return fallback
 
     def _build_messages(self, history: list[ChatMessage], message: str) -> list[BaseMessage]:
         messages: list[BaseMessage] = [SystemMessage(content=self._settings.chat_system_prompt)]

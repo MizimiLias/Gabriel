@@ -11,6 +11,7 @@ from app.configs.settings import get_settings
 from app.controllers.chat_controller import router as chat_router
 from app.controllers.health_controller import router as health_router
 from app.exceptions.handlers import register_exception_handlers
+from app.integrations.registry import build_connector_manager
 from app.middleware import RequestContextMiddleware
 
 
@@ -18,8 +19,13 @@ from app.middleware import RequestContextMiddleware
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Manage application-level resource lifecycles."""
 
-    yield
-    await dispose_engine()
+    connector_manager = build_connector_manager(get_settings())
+    await connector_manager.start()
+    try:
+        yield
+    finally:
+        await connector_manager.stop()
+        await dispose_engine()
 
 
 def create_app() -> FastAPI:
