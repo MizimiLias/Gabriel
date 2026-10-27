@@ -14,9 +14,14 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from app.configs.settings import Settings
 from app.entities.chat_message import ChatMessage
 from app.entities.chat_session import SessionSource
-from app.exceptions.chat import ChatUpstreamError
+from app.exceptions.chat import ChatUpstreamError, PersonaNotFoundError
 from app.prompts import TITLE_SYSTEM_PROMPT
-from app.repositories.chat_repository import ChatRepository, ChatSessionSummaryRow
+from app.repositories.chat_repository import (
+    ChatRepository,
+    ChatSessionMeta,
+    ChatSessionSummaryRow,
+)
+from app.repositories.persona_repository import PersonaRecord, PersonaRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -113,6 +118,14 @@ def _fallback_title(message: str) -> str:
     return _normalise_title(message) or "New chat"
 
 
+@dataclass(frozen=True, slots=True)
+class _ChatContext:
+    """Persona data used to assemble one model request."""
+
+    persona: PersonaRecord | None
+    persona_id_for_new_session: UUID | None
+
+
 class ChatService:
     """Coordinates history loading, model invocation, and persistence."""
 
@@ -121,10 +134,12 @@ class ChatService:
         repository: ChatRepository,
         model: BaseChatModel,
         settings: Settings,
+        persona_repository: PersonaRepository | None = None,
     ) -> None:
         self._repository = repository
         self._model = model
         self._settings = settings
+        self._persona_repository = persona_repository
 
     async def send_message(
         self,
@@ -133,15 +148,21 @@ class ChatService:
         *,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
+        persona_id: UUID | None = None,
     ) -> ChatReply:
         """Generate one complete response and persist the successful exchange."""
 
         async with await _get_session_lock(session_id):
+            session_meta = await self._repository.get_session_meta(session_id)
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
             )
-            existing_title = await self._repository.get_session_title(session_id)
-            response = await self._invoke(self._build_messages(history, message))
+            context = await self._resolve_chat_context(
+                session_meta=session_meta,
+                requested_persona_id=persona_id,
+            )
+            existing_title = session_meta.title if session_meta is not None else None
+            response = await self._invoke(self._build_messages(history, message, context.persona))
             if not response:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
@@ -159,6 +180,7 @@ class ChatService:
                 title=title,
                 source=source,
                 external_key=external_key,
+                persona_id=context.persona_id_for_new_session,
             )
             return ChatReply(message=stored_message, title=title)
 
@@ -169,15 +191,21 @@ class ChatService:
         *,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
+        persona_id: UUID | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Generate one response as text fragments and persist only on completion."""
 
         async with await _get_session_lock(session_id):
+            session_meta = await self._repository.get_session_meta(session_id)
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
             )
-            existing_title = await self._repository.get_session_title(session_id)
-            messages = self._build_messages(history, message)
+            context = await self._resolve_chat_context(
+                session_meta=session_meta,
+                requested_persona_id=persona_id,
+            )
+            existing_title = session_meta.title if session_meta is not None else None
+            messages = self._build_messages(history, message, context.persona)
             assistant_message_id = uuid4()
             fragments: list[str] = []
             yield StreamStart(session_id=session_id, message_id=assistant_message_id)
@@ -222,6 +250,7 @@ class ChatService:
                 title=title,
                 source=source,
                 external_key=external_key,
+                persona_id=context.persona_id_for_new_session,
             )
             yield StreamDone(
                 session_id=session_id,
@@ -306,8 +335,53 @@ class ChatService:
             )
             return fallback
 
-    def _build_messages(self, history: list[ChatMessage], message: str) -> list[BaseMessage]:
-        messages: list[BaseMessage] = [SystemMessage(content=self._settings.chat_system_prompt)]
+    async def _resolve_chat_context(
+        self,
+        *,
+        session_meta: ChatSessionMeta | None,
+        requested_persona_id: UUID | None,
+    ) -> _ChatContext:
+        """Resolve the persona for an existing or new session."""
+
+        if session_meta is not None:
+            persona = await self._load_persona(session_meta.persona_id)
+            return _ChatContext(persona=persona, persona_id_for_new_session=None)
+
+        if requested_persona_id is None:
+            return _ChatContext(persona=None, persona_id_for_new_session=None)
+
+        if self._persona_repository is None:
+            raise RuntimeError("A persona repository is required to bind a persona.")
+        persona = await self._persona_repository.get(requested_persona_id)
+        if persona is None:
+            raise PersonaNotFoundError("The requested persona does not exist.")
+        return _ChatContext(
+            persona=persona,
+            persona_id_for_new_session=persona.persona_id,
+        )
+
+    async def _load_persona(self, persona_id: UUID | None) -> PersonaRecord | None:
+        if persona_id is None or self._persona_repository is None:
+            return None
+        persona = await self._persona_repository.get(persona_id)
+        if persona is None:
+            logger.warning("chat_persona_missing", persona_id=str(persona_id))
+        return persona
+
+    def _build_messages(
+        self,
+        history: list[ChatMessage],
+        message: str,
+        persona: PersonaRecord | None,
+    ) -> list[BaseMessage]:
+        messages: list[BaseMessage] = []
+        if persona is not None:
+            messages.append(SystemMessage(content=persona.system_prompt))
+            for preset in persona.messages:
+                if preset.role == "user":
+                    messages.append(HumanMessage(content=preset.content))
+                else:
+                    messages.append(AIMessage(content=preset.content))
         for stored_message in history:
             if stored_message.role == "user":
                 messages.append(HumanMessage(content=stored_message.content))

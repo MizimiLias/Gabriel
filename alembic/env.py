@@ -13,6 +13,8 @@ from app.entities.base import Base
 from app.entities.chat_message import ChatMessage  # noqa: F401
 from app.entities.chat_session import ChatSession  # noqa: F401
 from app.entities.inbound_event import InboundEvent  # noqa: F401
+from app.entities.persona import Persona  # noqa: F401
+from app.entities.persona_message import PersonaMessage  # noqa: F401
 
 config = context.config
 

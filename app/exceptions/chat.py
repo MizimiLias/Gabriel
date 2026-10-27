@@ -15,3 +15,15 @@ class ChatUpstreamError(ChatError):
 
 class DatabaseUnavailableError(ChatError):
     """Raised when a required database check fails."""
+
+
+class PersonaNotFoundError(ChatError):
+    """Raised when a requested persona does not exist."""
+
+
+class PersonaConflictError(ChatError):
+    """Raised when a persona name is already in use."""
+
+
+class PersonaValidationError(ChatError):
+    """Raised when persona input violates the configured limits."""

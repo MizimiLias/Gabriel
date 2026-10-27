@@ -13,6 +13,9 @@ from app.exceptions.chat import (
     ChatSessionNotFoundError,
     ChatUpstreamError,
     DatabaseUnavailableError,
+    PersonaConflictError,
+    PersonaNotFoundError,
+    PersonaValidationError,
 )
 from app.schemas.error import ProblemDetail
 
@@ -51,6 +54,36 @@ async def chat_session_not_found_handler(request: Request, exc: Exception) -> JS
         title="Chat session not found",
         status=404,
         detail=str(exc) or "The requested chat session does not exist.",
+    )
+
+
+async def persona_not_found_handler(request: Request, exc: Exception) -> JSONResponse:
+    return _problem(
+        request,
+        code="persona-not-found",
+        title="Persona not found",
+        status=404,
+        detail=str(exc) or "The requested persona does not exist.",
+    )
+
+
+async def persona_conflict_handler(request: Request, exc: Exception) -> JSONResponse:
+    return _problem(
+        request,
+        code="persona-conflict",
+        title="Persona conflict",
+        status=409,
+        detail=str(exc) or "The persona conflicts with an existing one.",
+    )
+
+
+async def persona_validation_handler(request: Request, exc: Exception) -> JSONResponse:
+    return _problem(
+        request,
+        code="persona-validation-error",
+        title="Persona validation failed",
+        status=422,
+        detail=str(exc) or "The persona input is invalid.",
     )
 
 
@@ -127,6 +160,9 @@ def register_exception_handlers(application: FastAPI) -> None:
     """Register all application exception handlers."""
 
     application.add_exception_handler(ChatSessionNotFoundError, chat_session_not_found_handler)
+    application.add_exception_handler(PersonaNotFoundError, persona_not_found_handler)
+    application.add_exception_handler(PersonaConflictError, persona_conflict_handler)
+    application.add_exception_handler(PersonaValidationError, persona_validation_handler)
     application.add_exception_handler(ChatUpstreamError, chat_upstream_error_handler)
     application.add_exception_handler(DatabaseUnavailableError, database_unavailable_handler)
     application.add_exception_handler(SQLAlchemyError, database_error_handler)

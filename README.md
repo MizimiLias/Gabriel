@@ -93,6 +93,66 @@ have no title.
 
 Health endpoints are `/health/live` and `/health/ready`.
 
+## Personas
+
+A persona is a named system prompt plus optional preset dialogue. Preset
+dialogue is injected as few-shot context between the system prompt and the
+persisted conversation history; it is never stored in `chat_messages`, never
+appears in session history, and does not consume message sequence numbers.
+Personas are read from PostgreSQL on every message, so edits take effect on the
+next request.
+
+There is no global system prompt. A session without a persona sends no system
+message at all — only its persisted history and the new user message.
+
+Manage personas:
+
+```bash
+curl -X POST http://127.0.0.1:8086/api/personas \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"Gabriel",
+    "description":"Default assistant",
+    "system_prompt":"You are Gabriel, a helpful personal assistant.",
+    "messages":[
+      {"role":"user","content":"Who are you?"},
+      {"role":"assistant","content":"I am Gabriel."}
+    ]
+  }'
+
+curl http://127.0.0.1:8086/api/personas
+curl http://127.0.0.1:8086/api/personas/<persona-id>
+curl -X PATCH http://127.0.0.1:8086/api/personas/<persona-id> \
+  -H 'Content-Type: application/json' -d '{"system_prompt":"You are Gabriel, briefly."}'
+curl -X PUT http://127.0.0.1:8086/api/personas/<persona-id>/messages \
+  -H 'Content-Type: application/json' -d '{"messages":[]}'
+curl -X DELETE http://127.0.0.1:8086/api/personas/<persona-id>
+```
+
+A web session binds a persona on its first message:
+
+```bash
+curl -X POST http://127.0.0.1:8086/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","message":"Hello","persona_id":"<persona-id>"}'
+```
+
+There is no API for switching a persona mid-session. Update the database
+directly; the next message picks it up. This also works for QQ sessions:
+
+```sql
+UPDATE chat_sessions SET persona_id = '<persona-id>' WHERE session_id = '<session-id>';
+```
+
+Deleting a persona clears the reference (`ON DELETE SET NULL`) and the session
+falls back to no system prompt. `GET /api/chat/sessions` reports `persona_id`
+and `persona_name` for each session.
+
+`DEFAULT_SYSTEM_PROMPT` and `CHAT_SYSTEM_PROMPT` no longer exist. After
+upgrading, existing sessions have `persona_id = NULL`, so they stop receiving a
+system prompt. The QQ group sender prefix (`username: message`) is not explained
+to the model unless a persona whose system prompt describes it is bound.
+
 ## QQ official bot
 
 Gabriel uses the official `qq-botpy` SDK in WebSocket mode. The process makes

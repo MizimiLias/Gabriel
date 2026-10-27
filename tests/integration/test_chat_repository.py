@@ -5,11 +5,14 @@ from collections.abc import AsyncIterator
 from uuid import uuid4
 
 import pytest
+from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.entities.chat_session import SessionSource
+from app.entities.inbound_event import InboundEvent
 from app.exceptions.chat import ChatSessionNotFoundError
 from app.repositories.chat_repository import ChatRepository, InboundEventRepository
+from app.repositories.persona_repository import PersonaRepository
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
@@ -119,10 +122,105 @@ async def test_session_without_title_round_trips(db_session: AsyncSession) -> No
 
 async def test_inbound_event_claim_is_idempotent(db_session: AsyncSession) -> None:
     repository = InboundEventRepository(db_session)
-    event_id = f"ROBOT1.0_{'x' * 128}"
+    event_id = f"ROBOT1.0_{uuid4().hex}" + "x" * 96
     assert len(event_id) == 137
 
     assert await repository.claim(SessionSource.QQ_C2C, event_id) is True
     assert await repository.claim(SessionSource.QQ_C2C, event_id) is False
 
     await repository.mark_completed(SessionSource.QQ_C2C, event_id)
+
+    await db_session.execute(
+        delete(InboundEvent).where(
+            InboundEvent.source == SessionSource.QQ_C2C.value,
+            InboundEvent.external_event_id == event_id,
+        )
+    )
+    await db_session.commit()
+
+
+async def test_persona_is_persisted_only_when_session_is_created(
+    db_session: AsyncSession,
+) -> None:
+    personas = PersonaRepository(db_session)
+    first = await personas.create(
+        name=f"first-{uuid4().hex[:8]}",
+        description=None,
+        system_prompt="First persona.",
+        messages=[],
+    )
+    second = await personas.create(
+        name=f"second-{uuid4().hex[:8]}",
+        description=None,
+        system_prompt="Second persona.",
+        messages=[],
+    )
+    repository = ChatRepository(db_session)
+    session_id = uuid4()
+
+    await repository.save_exchange(
+        session_id=session_id,
+        user_content="hello",
+        assistant_content="hi",
+        assistant_message_id=uuid4(),
+        persona_id=first.persona_id,
+    )
+    meta = await repository.get_session_meta(session_id)
+    assert meta is not None
+    assert meta.persona_id == first.persona_id
+    assert meta.source is SessionSource.WEB
+
+    await repository.save_exchange(
+        session_id=session_id,
+        user_content="again",
+        assistant_content="hi again",
+        assistant_message_id=uuid4(),
+        persona_id=second.persona_id,
+    )
+    meta = await repository.get_session_meta(session_id)
+    assert meta is not None
+    assert meta.persona_id == first.persona_id
+
+    await personas.delete(first.persona_id)
+    meta = await repository.get_session_meta(session_id)
+    assert meta is not None
+    assert meta.persona_id is None
+
+    await repository.delete_session(session_id)
+    await personas.delete(second.persona_id)
+
+
+async def test_get_session_meta_returns_none_for_missing_session(
+    db_session: AsyncSession,
+) -> None:
+    repository = ChatRepository(db_session)
+
+    assert await repository.get_session_meta(uuid4()) is None
+
+
+async def test_list_sessions_exposes_persona_name(db_session: AsyncSession) -> None:
+    personas = PersonaRepository(db_session)
+    persona = await personas.create(
+        name=f"listed-{uuid4().hex[:8]}",
+        description=None,
+        system_prompt="Listed persona.",
+        messages=[],
+    )
+    repository = ChatRepository(db_session)
+    session_id = uuid4()
+
+    await repository.save_exchange(
+        session_id=session_id,
+        user_content="hello",
+        assistant_content="hi",
+        assistant_message_id=uuid4(),
+        persona_id=persona.persona_id,
+    )
+
+    sessions = await repository.list_sessions()
+    row = next(item for item in sessions if item.session_id == session_id)
+    assert row.persona_id == persona.persona_id
+    assert row.persona_name == persona.name
+
+    await repository.delete_session(session_id)
+    await personas.delete(persona.persona_id)

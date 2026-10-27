@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.entities.chat_message import ChatMessage
 from app.entities.chat_session import ChatSession, SessionSource
 from app.entities.inbound_event import InboundEvent
+from app.entities.persona import Persona
 from app.exceptions.chat import ChatSessionNotFoundError
 
 
@@ -26,6 +27,17 @@ class ChatSessionSummaryRow:
     updated_at: datetime
     message_count: int
     last_message_preview: str
+    persona_id: UUID | None = None
+    persona_name: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ChatSessionMeta:
+    """Session attributes needed before assembling a model request."""
+
+    title: str | None
+    source: SessionSource
+    persona_id: UUID | None
 
 
 class ChatRepository:
@@ -72,6 +84,26 @@ class ChatRepository:
             ),
         )
 
+    async def get_session_meta(self, session_id: UUID) -> ChatSessionMeta | None:
+        """Return session attributes; None means the session does not exist."""
+
+        row = (
+            await self._session.execute(
+                select(
+                    ChatSession.title,
+                    ChatSession.source,
+                    ChatSession.persona_id,
+                ).where(ChatSession.session_id == session_id)
+            )
+        ).first()
+        if row is None:
+            return None
+        return ChatSessionMeta(
+            title=row.title,
+            source=SessionSource(row.source),
+            persona_id=row.persona_id,
+        )
+
     async def session_exists(self, session_id: UUID) -> bool:
         """Return whether a session exists."""
 
@@ -104,11 +136,14 @@ class ChatRepository:
                 ChatSession.session_id,
                 ChatSession.title,
                 ChatSession.source,
+                ChatSession.persona_id,
+                Persona.name.label("persona_name"),
                 ChatSession.created_at,
                 ChatSession.updated_at,
                 message_count.label("message_count"),
                 func.coalesce(func.left(latest_message, 160), "").label("last_message_preview"),
             )
+            .outerjoin(Persona, Persona.persona_id == ChatSession.persona_id)
             .where(ChatSession.source == source.value)
             .order_by(ChatSession.updated_at.desc())
         )
@@ -122,6 +157,8 @@ class ChatRepository:
                 updated_at=row.updated_at,
                 message_count=row.message_count,
                 last_message_preview=row.last_message_preview,
+                persona_id=row.persona_id,
+                persona_name=row.persona_name,
             )
             for row in rows
         ]
@@ -136,6 +173,7 @@ class ChatRepository:
         title: str | None = None,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
+        persona_id: UUID | None = None,
     ) -> ChatMessage:
         """Atomically create the session when needed and store one completed exchange."""
 
@@ -147,6 +185,7 @@ class ChatRepository:
                 title=title,
                 source=source.value,
                 external_key=external_key,
+                persona_id=persona_id,
                 created_at=now,
                 updated_at=now,
             )

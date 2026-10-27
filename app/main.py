@@ -10,6 +10,7 @@ from app.configs.logging import configure_logging
 from app.configs.settings import get_settings
 from app.controllers.chat_controller import router as chat_router
 from app.controllers.health_controller import router as health_router
+from app.controllers.persona_controller import router as persona_router
 from app.exceptions.handlers import register_exception_handlers
 from app.integrations.registry import build_connector_manager
 from app.middleware import RequestContextMiddleware
@@ -45,6 +46,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(application)
     application.include_router(chat_router)
     application.include_router(health_router)
+    application.include_router(persona_router)
     return application
 
 

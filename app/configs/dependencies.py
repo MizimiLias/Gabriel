@@ -10,7 +10,9 @@ from app.configs.database import SessionFactory
 from app.configs.llm import get_chat_model
 from app.configs.settings import get_settings
 from app.repositories.chat_repository import ChatRepository
+from app.repositories.persona_repository import PersonaRepository
 from app.services.chat_service import ChatService
+from app.services.persona_service import PersonaService
 
 
 async def get_db() -> AsyncIterator[AsyncSession]:
@@ -32,4 +34,12 @@ async def get_chat_service(
 ) -> ChatService:
     """Assemble the request-scoped chat service."""
 
-    return ChatService(ChatRepository(db), model, get_settings())
+    return ChatService(ChatRepository(db), model, get_settings(), PersonaRepository(db))
+
+
+async def get_persona_service(
+    db: AsyncSession = Depends(get_db),  # noqa: B008
+) -> PersonaService:
+    """Assemble the request-scoped persona service."""
+
+    return PersonaService(PersonaRepository(db))

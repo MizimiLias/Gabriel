@@ -12,7 +12,7 @@ from sse_starlette import EventSourceResponse, ServerSentEvent
 from app.configs.dependencies import get_chat_service, get_request_id
 from app.entities.chat_message import ChatMessage
 from app.entities.chat_session import SessionSource
-from app.exceptions.chat import ChatUpstreamError
+from app.exceptions.chat import ChatUpstreamError, PersonaNotFoundError
 from app.repositories.chat_repository import ChatSessionSummaryRow
 from app.schemas.chat import (
     ChatHistoryResponse,
@@ -61,6 +61,8 @@ def _session_summary(row: ChatSessionSummaryRow) -> ChatSessionSummary:
         updated_at=row.updated_at,
         message_count=row.message_count,
         last_message_preview=row.last_message_preview,
+        persona_id=row.persona_id,
+        persona_name=row.persona_name,
     )
 
 
@@ -71,7 +73,9 @@ async def send_message(
 ) -> ChatResponse:
     """Generate one complete assistant response."""
 
-    reply = await service.send_message(payload.session_id, payload.message)
+    reply = await service.send_message(
+        payload.session_id, payload.message, persona_id=payload.persona_id
+    )
     return ChatResponse(
         session_id=payload.session_id,
         title=reply.title,
@@ -91,7 +95,9 @@ async def stream_message(
 
     async def events() -> AsyncIterator[ServerSentEvent]:
         try:
-            async for event in service.stream_message(payload.session_id, payload.message):
+            async for event in service.stream_message(
+                payload.session_id, payload.message, persona_id=payload.persona_id
+            ):
                 if isinstance(event, StreamStart):
                     start = StreamStartEvent(
                         session_id=event.session_id,
@@ -118,6 +124,13 @@ async def stream_message(
                     yield ServerSentEvent(event="done", data=done.model_dump_json())
         except asyncio.CancelledError:
             raise
+        except PersonaNotFoundError:
+            error = SSEErrorEvent(
+                code="PERSONA_NOT_FOUND",
+                message="The requested persona does not exist.",
+                request_id=request_id,
+            )
+            yield ServerSentEvent(event="error", data=error.model_dump_json())
         except ChatUpstreamError as exc:
             error = SSEErrorEvent(
                 code="LLM_UPSTREAM_ERROR",

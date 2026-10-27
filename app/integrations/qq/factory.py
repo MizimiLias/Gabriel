@@ -9,6 +9,7 @@ from app.configs.settings import Settings, get_settings
 from app.integrations.qq.connector import QQBotConnector
 from app.integrations.qq.handler import QQMessageHandler
 from app.repositories.chat_repository import ChatRepository, InboundEventRepository
+from app.repositories.persona_repository import PersonaRepository
 from app.services.chat_service import ChatService
 
 
@@ -17,7 +18,12 @@ async def chat_service_scope() -> AsyncIterator[ChatService]:
     """Create a database-backed chat service for one inbound event."""
 
     async with SessionFactory() as session:
-        yield ChatService(ChatRepository(session), build_chat_model(), get_settings())
+        yield ChatService(
+            ChatRepository(session),
+            build_chat_model(),
+            get_settings(),
+            PersonaRepository(session),
+        )
 
 
 @asynccontextmanager

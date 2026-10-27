@@ -1,6 +1,7 @@
 """Shared test doubles and settings helpers."""
 
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -11,9 +12,19 @@ from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from app.configs.settings import Settings
 from app.entities.chat_message import ChatMessage
 from app.entities.chat_session import SessionSource
-from app.exceptions.chat import ChatSessionNotFoundError
+from app.exceptions.chat import (
+    ChatSessionNotFoundError,
+    PersonaConflictError,
+    PersonaNotFoundError,
+)
 from app.prompts import TITLE_SYSTEM_PROMPT
-from app.repositories.chat_repository import ChatSessionSummaryRow
+from app.repositories.chat_repository import ChatSessionMeta, ChatSessionSummaryRow
+from app.repositories.persona_repository import (
+    PersonaMessageDraft,
+    PersonaMessageRecord,
+    PersonaRecord,
+    PersonaSummaryRow,
+)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -49,9 +60,11 @@ class FakeChatModel:
         self.fail_title = fail_title
         self.title_calls = 0
         self.last_messages: list[BaseMessage] = []
+        self.calls: list[list[BaseMessage]] = []
 
     async def ainvoke(self, messages: list[BaseMessage]) -> AIMessage:
         self.last_messages = messages
+        self.calls.append(messages)
         if messages and messages[0].text == TITLE_SYSTEM_PROMPT:
             self.title_calls += 1
             if self.fail_title:
@@ -63,6 +76,7 @@ class FakeChatModel:
 
     async def astream(self, messages: list[BaseMessage]) -> AsyncIterator[AIMessageChunk]:
         self.last_messages = messages
+        self.calls.append(messages)
         if self.fail:
             raise RuntimeError("provider failed")
         for chunk in self.chunks:
@@ -80,6 +94,8 @@ class FakeChatRepository:
         self.titles: dict[UUID, str | None] = {}
         self.sources: dict[UUID, SessionSource] = {}
         self.external_keys: dict[UUID, str | None] = {}
+        self.persona_ids: dict[UUID, UUID | None] = {}
+        self.persona_names: dict[UUID, str] = {}
         self.saved_exchanges: list[tuple[UUID, str, str]] = []
 
     async def get_recent_messages(self, session_id: UUID, limit: int) -> list[ChatMessage]:
@@ -95,6 +111,15 @@ class FakeChatRepository:
     async def get_session_title(self, session_id: UUID) -> str | None:
         return self.titles.get(session_id)
 
+    async def get_session_meta(self, session_id: UUID) -> ChatSessionMeta | None:
+        if session_id not in self.messages:
+            return None
+        return ChatSessionMeta(
+            title=self.titles.get(session_id),
+            source=self.sources.get(session_id, SessionSource.WEB),
+            persona_id=self.persona_ids.get(session_id),
+        )
+
     async def session_exists(self, session_id: UUID) -> bool:
         return session_id in self.messages
 
@@ -106,6 +131,7 @@ class FakeChatRepository:
             if self.sources.get(session_id, SessionSource.WEB) != source:
                 continue
             last_message = messages[-1]
+            persona_id = self.persona_ids.get(session_id)
             rows.append(
                 ChatSessionSummaryRow(
                     session_id=session_id,
@@ -115,6 +141,10 @@ class FakeChatRepository:
                     updated_at=last_message.created_at,
                     message_count=len(messages),
                     last_message_preview=last_message.content[:160],
+                    persona_id=persona_id,
+                    persona_name=(
+                        self.persona_names.get(persona_id) if persona_id is not None else None
+                    ),
                 )
             )
         return sorted(rows, key=lambda row: row.updated_at, reverse=True)
@@ -129,6 +159,7 @@ class FakeChatRepository:
         title: str | None = None,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
+        persona_id: UUID | None = None,
     ) -> ChatMessage:
         now = datetime.now(UTC)
         user_message = ChatMessage(
@@ -149,6 +180,7 @@ class FakeChatRepository:
         self.titles.setdefault(session_id, title)
         self.sources.setdefault(session_id, source)
         self.external_keys.setdefault(session_id, external_key)
+        self.persona_ids.setdefault(session_id, persona_id)
         self.saved_exchanges.append((session_id, user_content, assistant_content))
         return assistant_message
 
@@ -162,3 +194,111 @@ class FakeChatRepository:
     async def delete_session(self, session_id: UUID) -> None:
         self.messages.pop(session_id, None)
         self.titles.pop(session_id, None)
+
+
+class FakePersonaRepository:
+    """In-memory repository matching the interface used by PersonaService."""
+
+    def __init__(self) -> None:
+        self.personas: dict[UUID, PersonaRecord] = {}
+
+    async def get(self, persona_id: UUID) -> PersonaRecord | None:
+        return self.personas.get(persona_id)
+
+    async def list_all(self) -> list[PersonaSummaryRow]:
+        return [
+            PersonaSummaryRow(
+                persona_id=record.persona_id,
+                name=record.name,
+                description=record.description,
+                message_count=len(record.messages),
+                created_at=record.created_at,
+                updated_at=record.updated_at,
+            )
+            for record in sorted(self.personas.values(), key=lambda item: item.name)
+        ]
+
+    async def create(
+        self,
+        *,
+        name: str,
+        description: str | None,
+        system_prompt: str,
+        messages: list[PersonaMessageDraft],
+    ) -> PersonaRecord:
+        if any(record.name == name for record in self.personas.values()):
+            raise PersonaConflictError("A persona with this name already exists.")
+        now = datetime.now(UTC)
+        persona_id = uuid4()
+        record = PersonaRecord(
+            persona_id=persona_id,
+            name=name,
+            description=description,
+            system_prompt=system_prompt,
+            messages=tuple(
+                PersonaMessageRecord(
+                    id=uuid4(),
+                    position=position,
+                    role=draft.role,
+                    content=draft.content,
+                )
+                for position, draft in enumerate(messages)
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+        self.personas[persona_id] = record
+        return record
+
+    async def update(
+        self,
+        persona_id: UUID,
+        *,
+        name: str,
+        description: str | None,
+        system_prompt: str,
+    ) -> PersonaRecord:
+        current = self.personas.get(persona_id)
+        if current is None:
+            raise PersonaNotFoundError("The requested persona does not exist.")
+        if any(
+            record.persona_id != persona_id and record.name == name
+            for record in self.personas.values()
+        ):
+            raise PersonaConflictError("A persona with this name already exists.")
+        updated = replace(
+            current,
+            name=name,
+            description=description,
+            system_prompt=system_prompt,
+            updated_at=datetime.now(UTC),
+        )
+        self.personas[persona_id] = updated
+        return updated
+
+    async def replace_messages(
+        self, persona_id: UUID, messages: list[PersonaMessageDraft]
+    ) -> PersonaRecord:
+        current = self.personas.get(persona_id)
+        if current is None:
+            raise PersonaNotFoundError("The requested persona does not exist.")
+        updated = replace(
+            current,
+            messages=tuple(
+                PersonaMessageRecord(
+                    id=uuid4(),
+                    position=position,
+                    role=draft.role,
+                    content=draft.content,
+                )
+                for position, draft in enumerate(messages)
+            ),
+            updated_at=datetime.now(UTC),
+        )
+        self.personas[persona_id] = updated
+        return updated
+
+    async def delete(self, persona_id: UUID) -> None:
+        if persona_id not in self.personas:
+            raise PersonaNotFoundError("The requested persona does not exist.")
+        del self.personas[persona_id]

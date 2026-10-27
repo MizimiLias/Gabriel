@@ -16,6 +16,7 @@ class ChatRequest(BaseModel):
 
     session_id: UUID
     message: str = Field(min_length=1, max_length=32_000)
+    persona_id: UUID | None = None
 
 
 class ChatMessageResponse(BaseModel):
@@ -61,6 +62,8 @@ class ChatSessionSummary(BaseModel):
     updated_at: datetime
     message_count: int
     last_message_preview: str
+    persona_id: UUID | None = None
+    persona_name: str | None = None
 
 
 class ChatSessionListResponse(BaseModel):

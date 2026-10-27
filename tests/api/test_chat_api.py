@@ -10,17 +10,26 @@ from app.configs.dependencies import get_chat_service
 from app.entities.chat_session import SessionSource
 from app.main import app
 from app.services.chat_service import ChatService
-from tests.support import FakeChatModel, FakeChatRepository, make_settings
+from tests.support import (
+    FakeChatModel,
+    FakeChatRepository,
+    FakePersonaRepository,
+    make_settings,
+)
 
 
 @pytest.fixture
-async def api_context() -> AsyncIterator[tuple[AsyncClient, FakeChatRepository]]:
+async def api_context() -> AsyncIterator[
+    tuple[AsyncClient, FakeChatRepository, FakePersonaRepository]
+]:
     repository = FakeChatRepository()
+    personas = FakePersonaRepository()
     model = FakeChatModel(response="Stored answer", title_response="Remembering details")
     service = ChatService(
         repository=repository,  # type: ignore[arg-type]
         model=model.as_base_chat_model(),
         settings=make_settings(),
+        persona_repository=personas,  # type: ignore[arg-type]
     )
 
     async def override_service() -> ChatService:
@@ -29,13 +38,13 @@ async def api_context() -> AsyncIterator[tuple[AsyncClient, FakeChatRepository]]
     app.dependency_overrides[get_chat_service] = override_service
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        yield client, repository
+        yield client, repository, personas
     app.dependency_overrides.clear()
 
 
 @pytest.fixture
 async def api_client(
-    api_context: tuple[AsyncClient, FakeChatRepository],
+    api_context: tuple[AsyncClient, FakeChatRepository, FakePersonaRepository],
 ) -> AsyncClient:
     return api_context[0]
 
@@ -115,9 +124,9 @@ async def test_health_live() -> None:
 
 
 async def test_session_list_hides_qq_sessions_by_default(
-    api_context: tuple[AsyncClient, FakeChatRepository],
+    api_context: tuple[AsyncClient, FakeChatRepository, FakePersonaRepository],
 ) -> None:
-    client, repository = api_context
+    client, repository, _personas = api_context
     web_session_id = uuid4()
     qq_session_id = uuid4()
     await repository.save_exchange(
@@ -143,3 +152,49 @@ async def test_session_list_hides_qq_sessions_by_default(
     ]
     assert [item["session_id"] for item in qq_sessions.json()["items"]] == [str(qq_session_id)]
     assert qq_sessions.json()["items"][0]["source"] == "qq_group"
+
+
+async def test_chat_persona_id_is_persisted_and_listed(
+    api_context: tuple[AsyncClient, FakeChatRepository, FakePersonaRepository],
+) -> None:
+    client, repository, personas = api_context
+    persona = await personas.create(
+        name="Ada",
+        description=None,
+        system_prompt="You are Ada.",
+        messages=[],
+    )
+    repository.persona_names[persona.persona_id] = persona.name
+    session_id = uuid4()
+
+    response = await client.post(
+        "/api/chat",
+        json={
+            "session_id": str(session_id),
+            "message": "hello",
+            "persona_id": str(persona.persona_id),
+        },
+    )
+
+    assert response.status_code == 200
+    assert repository.persona_ids[session_id] == persona.persona_id
+
+    sessions = await client.get("/api/chat/sessions")
+    item = next(row for row in sessions.json()["items"] if row["session_id"] == str(session_id))
+    assert item["persona_id"] == str(persona.persona_id)
+    assert item["persona_name"] == "Ada"
+
+
+async def test_stream_unknown_persona_emits_error_event(api_client: AsyncClient) -> None:
+    response = await api_client.post(
+        "/api/chat/stream",
+        json={
+            "session_id": str(uuid4()),
+            "message": "hello",
+            "persona_id": str(uuid4()),
+        },
+    )
+
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    assert "PERSONA_NOT_FOUND" in response.text

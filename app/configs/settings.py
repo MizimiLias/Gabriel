@@ -7,8 +7,6 @@ from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
-from app.prompts import DEFAULT_SYSTEM_PROMPT
-
 
 class Settings(BaseSettings):
     """Runtime configuration for the agent service."""
@@ -41,8 +39,7 @@ class Settings(BaseSettings):
     chat_temperature: float = Field(default=0.8, ge=0.0, le=2.0)
     chat_timeout_seconds: float = Field(default=60.0, gt=0)
     chat_max_retries: int = Field(default=2, ge=0, le=10)
-    chat_context_message_limit: int = Field(default=20, ge=1, le=200)
-    chat_system_prompt: str = DEFAULT_SYSTEM_PROMPT
+    chat_context_message_limit: int = Field(default=200, ge=1, le=1000)
 
     qq_bot_enabled: bool = False
     qq_bot_app_id: str | None = None

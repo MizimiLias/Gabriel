@@ -6,21 +6,35 @@ from uuid import uuid4
 import pytest
 
 from app.entities.chat_session import SessionSource
+from app.exceptions.chat import PersonaNotFoundError
+from app.prompts import TITLE_SYSTEM_PROMPT
 from app.repositories.chat_repository import ChatRepository
+from app.repositories.persona_repository import (
+    PersonaMessageDraft,
+    PersonaRecord,
+    PersonaRepository,
+)
 from app.services.chat_service import ChatService, StreamDone, StreamStart, StreamToken
-from tests.support import FakeChatModel, FakeChatRepository, make_settings
+from tests.support import FakeChatModel, FakeChatRepository, FakePersonaRepository, make_settings
 
 
 def build_service(
     *,
     repository: FakeChatRepository,
     model: FakeChatModel,
+    persona_repository: FakePersonaRepository | None = None,
     context_limit: int = 20,
 ) -> ChatService:
+    persona_kwargs = (
+        {}
+        if persona_repository is None
+        else {"persona_repository": cast(PersonaRepository, persona_repository)}
+    )
     return ChatService(
         cast(ChatRepository, repository),
         model.as_base_chat_model(),
         make_settings(chat_context_message_limit=context_limit),
+        **persona_kwargs,
     )
 
 
@@ -36,7 +50,6 @@ async def test_second_turn_receives_persisted_history() -> None:
 
     serialized = [(message.type, message.text) for message in model.last_messages]
     assert serialized == [
-        ("system", model.last_messages[0].text),
         ("human", "My name is Ada"),
         ("ai", "first answer"),
         ("human", "What is my name?"),
@@ -53,11 +66,22 @@ async def test_context_limit_keeps_only_recent_messages() -> None:
     await service.send_message(session_id, "two")
     await service.send_message(session_id, "three")
 
-    assert [message.text for message in model.last_messages[1:]] == [
+    assert [message.text for message in model.last_messages] == [
         "two",
         model.response,
         "three",
     ]
+
+
+async def test_session_without_persona_sends_no_system_message() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    await service.send_message(session_id, "hello", source=SessionSource.QQ_C2C)
+
+    assert [message.type for message in model.last_messages] == ["human"]
 
 
 async def test_first_exchange_generates_title_once() -> None:
@@ -161,3 +185,239 @@ async def test_external_session_identity_is_persisted() -> None:
     assert repository.sources[session_id] == SessionSource.QQ_C2C
     assert repository.external_keys[session_id] == "app:user"
     assert repository.titles[session_id] is None
+
+
+def _persona_messages() -> list[PersonaMessageDraft]:
+    return [
+        PersonaMessageDraft(role="user", content="Who are you?"),
+        PersonaMessageDraft(role="assistant", content="I am Ada."),
+    ]
+
+
+async def _create_persona(
+    personas: FakePersonaRepository,
+    *,
+    name: str = "Ada",
+    system_prompt: str = "You are Ada.",
+) -> PersonaRecord:
+    return await personas.create(
+        name=name,
+        description=None,
+        system_prompt=system_prompt,
+        messages=_persona_messages(),
+    )
+
+
+async def test_first_web_message_injects_persona() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    await service.send_message(session_id, "hello", persona_id=persona.persona_id)
+
+    assert [(message.type, message.text) for message in model.calls[0]] == [
+        ("system", "You are Ada."),
+        ("human", "Who are you?"),
+        ("ai", "I am Ada."),
+        ("human", "hello"),
+    ]
+    assert repository.persona_ids[session_id] == persona.persona_id
+
+
+async def test_first_web_message_without_persona_has_no_system_message() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(
+        repository=repository, model=model, persona_repository=FakePersonaRepository()
+    )
+    session_id = uuid4()
+
+    await service.send_message(session_id, "hello")
+
+    assert [(message.type, message.text) for message in model.calls[0]] == [("human", "hello")]
+    assert repository.persona_ids[session_id] is None
+
+
+async def test_existing_session_keeps_its_persona_and_ignores_requested_id() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    first = await _create_persona(personas, name="Ada", system_prompt="You are Ada.")
+    second = await _create_persona(personas, name="Bob", system_prompt="You are Bob.")
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    await service.send_message(session_id, "first", persona_id=first.persona_id)
+    await service.send_message(session_id, "second", persona_id=second.persona_id)
+
+    assert model.calls[-1][0].text == "You are Ada."
+    assert repository.persona_ids[session_id] == first.persona_id
+
+
+async def test_existing_session_without_persona_ignores_requested_id() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    await service.send_message(session_id, "first")
+    await service.send_message(session_id, "second", persona_id=persona.persona_id)
+
+    assert model.calls[-1][0].type == "human"
+    assert repository.persona_ids[session_id] is None
+
+
+async def test_qq_session_with_database_persona_is_injected() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    await repository.save_exchange(
+        session_id=session_id,
+        user_content="earlier",
+        assistant_content="answer",
+        assistant_message_id=uuid4(),
+        source=SessionSource.QQ_GROUP,
+        external_key="app:group",
+        persona_id=persona.persona_id,
+    )
+
+    await service.send_message(session_id, "hello", source=SessionSource.QQ_GROUP)
+
+    assert model.calls[-1][0].text == "You are Ada."
+
+
+async def test_qq_session_without_persona_has_no_system_message() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(
+        repository=repository, model=model, persona_repository=FakePersonaRepository()
+    )
+    session_id = uuid4()
+
+    await service.send_message(session_id, "hello", source=SessionSource.QQ_C2C)
+
+    assert model.calls[-1][0].type == "human"
+
+
+async def test_persona_edits_are_read_on_the_next_message() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    await service.send_message(session_id, "first", persona_id=persona.persona_id)
+    await personas.update(
+        persona.persona_id,
+        name=persona.name,
+        description=None,
+        system_prompt="You are Ada, briefly.",
+    )
+    await service.send_message(session_id, "second")
+
+    assert model.calls[-1][0].text == "You are Ada, briefly."
+
+
+async def test_deleted_persona_falls_back_to_no_system_message() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    await service.send_message(session_id, "first", persona_id=persona.persona_id)
+    await personas.delete(persona.persona_id)
+    await service.send_message(session_id, "second")
+
+    assert model.calls[-1][0].type == "human"
+
+
+async def test_unknown_persona_on_first_message_raises() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    service = build_service(
+        repository=repository, model=FakeChatModel(), persona_repository=personas
+    )
+
+    with pytest.raises(PersonaNotFoundError):
+        await service.send_message(uuid4(), "hello", persona_id=uuid4())
+
+
+async def test_stream_injects_persona_and_persists_only_the_exchange() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel(chunks=["Hi", " there"])
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    events = [
+        event
+        async for event in service.stream_message(
+            session_id,
+            "hello",
+            source=SessionSource.QQ_C2C,
+            persona_id=persona.persona_id,
+        )
+    ]
+
+    assert isinstance(events[-1], StreamDone)
+    assert [(message.type, message.text) for message in model.calls[0]] == [
+        ("system", "You are Ada."),
+        ("human", "Who are you?"),
+        ("ai", "I am Ada."),
+        ("human", "hello"),
+    ]
+    assert repository.persona_ids[session_id] == persona.persona_id
+    assert len(repository.messages[session_id]) == 2
+
+
+async def test_presets_do_not_consume_the_history_limit() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel(response="answer")
+    service = build_service(
+        repository=repository,
+        model=model,
+        persona_repository=personas,
+        context_limit=1,
+    )
+    session_id = uuid4()
+
+    await service.send_message(
+        session_id, "one", source=SessionSource.QQ_C2C, persona_id=persona.persona_id
+    )
+    await service.send_message(session_id, "two", source=SessionSource.QQ_C2C)
+
+    chat_call = model.calls[-1]
+    assert chat_call[0].text == "You are Ada."
+    assert [message.text for message in chat_call[1:3]] == ["Who are you?", "I am Ada."]
+    assert chat_call[3].type == "ai"
+    assert chat_call[4].text == "two"
+
+
+async def test_title_generation_excludes_persona_presets() -> None:
+    repository = FakeChatRepository()
+    personas = FakePersonaRepository()
+    persona = await _create_persona(personas)
+    model = FakeChatModel(title_response="Greeting")
+    service = build_service(repository=repository, model=model, persona_repository=personas)
+    session_id = uuid4()
+
+    await service.send_message(session_id, "hello", persona_id=persona.persona_id)
+
+    title_call = model.calls[1]
+    assert title_call[0].text == TITLE_SYSTEM_PROMPT
+    assert all("Who are you?" not in message.text for message in title_call)

@@ -35,8 +35,11 @@ class ChatMessage(Base):
         nullable=False,
     )
     sequence: Mapped[int] = mapped_column(BigInteger, Identity(), nullable=False)
+
     role: Mapped[str] = mapped_column(String(16), nullable=False)
+
     content: Mapped[str] = mapped_column(Text, nullable=False)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
