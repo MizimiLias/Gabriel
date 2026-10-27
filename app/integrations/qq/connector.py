@@ -1,10 +1,11 @@
 """QQ official bot WebSocket connector and SDK adapter."""
 
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Protocol
 
 import botpy
 import structlog
+from botpy import connection as botpy_connection
 from botpy.message import C2CMessage, GroupMessage
 
 from app.entities.chat_session import SessionSource
@@ -21,10 +22,51 @@ class QQClient(Protocol):
     async def close(self) -> None: ...
 
 
+class _EnrichedGroupMessage(GroupMessage):
+    """GroupMessage that retains the sender's QQ display name."""
+
+    __slots__ = ("author_name",)
+
+    author_name: str | None
+
+    def __init__(
+        self,
+        api: object,
+        event_id: str | None,
+        data: Mapping[str, object],
+    ) -> None:
+        author = data.get("author")
+        if not isinstance(author, Mapping):
+            author = {}
+            data = {**data, "author": author}
+        super().__init__(api, event_id, data)
+        username = author.get("username")
+        self.author_name = username if isinstance(username, str) and username.strip() else None
+
+
+def _install_group_message_patch() -> bool:
+    """Keep ``d.author.username`` that botpy's group parser drops.
+
+    ``ConnectionState.parse_group_at_message_create`` resolves ``GroupMessage``
+    from the ``botpy.connection`` module at call time, so replacing that name
+    is enough. Returns whether this call installed the patch.
+    """
+
+    current = getattr(botpy_connection, "GroupMessage", None)
+    if current is _EnrichedGroupMessage:
+        return False
+    if not isinstance(current, type) or not hasattr(current, "_User"):
+        logger.warning("qq_group_message_patch_skipped", reason="unexpected_botpy_shape")
+        return False
+    botpy_connection.GroupMessage = _EnrichedGroupMessage
+    return True
+
+
 class QQBotClient(botpy.Client):
     """Translate botpy events into channel-neutral QQ messages."""
 
     def __init__(self, handler: QQMessageHandler) -> None:
+        _install_group_message_patch()
         super().__init__(intents=botpy.Intents(public_messages=True), bot_log=False)
         self._handler = handler
 
@@ -44,6 +86,8 @@ class QQBotClient(botpy.Client):
                 content=message.content or "",
                 has_attachments=bool(message.attachments),
                 reply=self._reply_callback(message),
+                sender_name=getattr(message, "author_name", None),
+                sender_id=getattr(message.author, "member_openid", None),
             )
         )
 

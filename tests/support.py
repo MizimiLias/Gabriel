@@ -47,11 +47,13 @@ class FakeChatModel:
         self.chunks = chunks or ["Hello", " ", "world"]
         self.title_response = title_response
         self.fail_title = fail_title
+        self.title_calls = 0
         self.last_messages: list[BaseMessage] = []
 
     async def ainvoke(self, messages: list[BaseMessage]) -> AIMessage:
         self.last_messages = messages
         if messages and messages[0].text == TITLE_SYSTEM_PROMPT:
+            self.title_calls += 1
             if self.fail_title:
                 raise RuntimeError("title provider failed")
             return AIMessage(content=self.title_response)
@@ -75,7 +77,7 @@ class FakeChatRepository:
 
     def __init__(self) -> None:
         self.messages: dict[UUID, list[ChatMessage]] = {}
-        self.titles: dict[UUID, str] = {}
+        self.titles: dict[UUID, str | None] = {}
         self.sources: dict[UUID, SessionSource] = {}
         self.external_keys: dict[UUID, str | None] = {}
         self.saved_exchanges: list[tuple[UUID, str, str]] = []
@@ -83,10 +85,12 @@ class FakeChatRepository:
     async def get_recent_messages(self, session_id: UUID, limit: int) -> list[ChatMessage]:
         return self.messages.get(session_id, [])[-limit:]
 
-    async def get_history(self, session_id: UUID, limit: int) -> tuple[str, list[ChatMessage]]:
+    async def get_history(
+        self, session_id: UUID, limit: int
+    ) -> tuple[str | None, list[ChatMessage]]:
         if session_id not in self.messages:
             raise ChatSessionNotFoundError("The requested chat session does not exist.")
-        return self.titles[session_id], self.messages[session_id][-limit:]
+        return self.titles.get(session_id), self.messages[session_id][-limit:]
 
     async def get_session_title(self, session_id: UUID) -> str | None:
         return self.titles.get(session_id)
@@ -105,7 +109,7 @@ class FakeChatRepository:
             rows.append(
                 ChatSessionSummaryRow(
                     session_id=session_id,
-                    title=self.titles.get(session_id, "New chat"),
+                    title=self.titles.get(session_id),
                     source=source,
                     created_at=messages[0].created_at,
                     updated_at=last_message.created_at,
@@ -122,7 +126,7 @@ class FakeChatRepository:
         user_content: str,
         assistant_content: str,
         assistant_message_id: UUID,
-        title: str = "New chat",
+        title: str | None = None,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
     ) -> ChatMessage:

@@ -60,7 +60,7 @@ class StreamDone:
 
     session_id: UUID
     message_id: UUID
-    title: str
+    title: str | None
     created_at: datetime
 
 
@@ -69,7 +69,7 @@ class ChatReply:
     """A persisted assistant reply and its session title."""
 
     message: ChatMessage
-    title: str
+    title: str | None
 
 
 type StreamEvent = StreamStart | StreamToken | StreamReasoning | StreamDone
@@ -145,7 +145,12 @@ class ChatService:
             if not response:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
-            title = existing_title or await self._generate_title(message, response)
+            title = await self._resolve_title(
+                source=source,
+                existing_title=existing_title,
+                user_content=message,
+                assistant_content=response,
+            )
             stored_message = await self._repository.save_exchange(
                 session_id=session_id,
                 user_content=message,
@@ -203,7 +208,12 @@ class ChatService:
             if not content:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
-            title = existing_title or await self._generate_title(message, content)
+            title = await self._resolve_title(
+                source=source,
+                existing_title=existing_title,
+                user_content=message,
+                assistant_content=content,
+            )
             stored_message = await self._repository.save_exchange(
                 session_id=session_id,
                 user_content=message,
@@ -220,7 +230,9 @@ class ChatService:
                 created_at=stored_message.created_at,
             )
 
-    async def get_history(self, session_id: UUID, limit: int) -> tuple[str, list[ChatMessage]]:
+    async def get_history(
+        self, session_id: UUID, limit: int
+    ) -> tuple[str | None, list[ChatMessage]]:
         """Return the title and persisted history for an existing session."""
 
         return await self._repository.get_history(session_id, limit)
@@ -251,6 +263,24 @@ class ChatService:
             logger.warning("chat_upstream_failed", error_type=type(exc).__name__)
             raise ChatUpstreamError("The language model could not complete the response.") from exc
         return response.text
+
+    async def _resolve_title(
+        self,
+        *,
+        source: SessionSource,
+        existing_title: str | None,
+        user_content: str,
+        assistant_content: str,
+    ) -> str | None:
+        """Keep existing titles; generate one only for web sessions."""
+
+        if existing_title is not None:
+            return existing_title
+        # Every non-web channel (QQ, future integrations) stays untitled so no
+        # platform-specific identity has to flow into the title generation path.
+        if source is not SessionSource.WEB:
+            return None
+        return await self._generate_title(user_content, assistant_content)
 
     async def _generate_title(self, user_content: str, assistant_content: str) -> str:
         fallback = _fallback_title(user_content)

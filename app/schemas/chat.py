@@ -35,7 +35,7 @@ class ChatResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: UUID
-    title: str
+    title: str | None
     message: ChatMessageResponse
 
 
@@ -45,7 +45,7 @@ class ChatHistoryResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: UUID
-    title: str
+    title: str | None
     messages: list[ChatMessageResponse]
 
 
@@ -55,7 +55,7 @@ class ChatSessionSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     session_id: UUID
-    title: str
+    title: str | None
     source: SessionSource
     created_at: datetime
     updated_at: datetime
@@ -111,7 +111,7 @@ class StreamDoneEvent(BaseModel):
 
     session_id: UUID
     message_id: UUID
-    title: str
+    title: str | None
     created_at: datetime
 
 

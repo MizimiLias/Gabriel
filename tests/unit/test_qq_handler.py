@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 
 import pytest
+from langchain_core.messages import HumanMessage
 
 from app.entities.chat_session import SessionSource
 from app.integrations.qq.handler import (
@@ -51,6 +52,8 @@ def _inbound_message(
     content: str,
     replies: list[tuple[str, int]],
     has_attachments: bool = False,
+    sender_name: str | None = None,
+    sender_id: str | None = None,
 ) -> QQInboundMessage:
     async def reply(text: str, sequence: int) -> object:
         replies.append((text, sequence))
@@ -63,6 +66,8 @@ def _inbound_message(
         content=content,
         has_attachments=has_attachments,
         reply=reply,
+        sender_name=sender_name,
+        sender_id=sender_id,
     )
 
 
@@ -255,3 +260,165 @@ async def test_long_reply_increments_sequence() -> None:
 @pytest.mark.parametrize("source", [SessionSource.QQ_C2C, SessionSource.QQ_GROUP])
 def test_splitter_returns_single_short_message(source: SessionSource) -> None:
     assert split_qq_reply(" hello ", 4 if source == SessionSource.QQ_C2C else 5) == ["hello"]
+
+
+async def test_group_message_content_includes_sender_name() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, FakeChatModel(response="answer"), FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_GROUP,
+            event_id="event-1",
+            conversation_id="group-1",
+            content="hello",
+            replies=replies,
+            sender_name="Alice",
+            sender_id="member-1",
+        )
+    )
+
+    assert repository.saved_exchanges[0][1] == "<Alice>: hello"
+
+
+async def test_group_message_falls_back_to_sender_id() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, FakeChatModel(response="answer"), FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_GROUP,
+            event_id="event-1",
+            conversation_id="group-1",
+            content="hello",
+            replies=replies,
+            sender_id="member-123456789",
+        )
+    )
+
+    assert repository.saved_exchanges[0][1] == "<member-1>: hello"
+
+
+async def test_sender_name_is_sanitized() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, FakeChatModel(response="answer"), FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_GROUP,
+            event_id="event-1",
+            conversation_id="group-1",
+            content="hello",
+            replies=replies,
+            sender_name="  <Alice>\n\tAdmin  ",
+        )
+    )
+
+    assert repository.saved_exchanges[0][1] == "<Alice Admin>: hello"
+
+
+async def test_sender_name_is_truncated() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, FakeChatModel(response="answer"), FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_GROUP,
+            event_id="event-1",
+            conversation_id="group-1",
+            content="hello",
+            replies=replies,
+            sender_name="A" * 100,
+        )
+    )
+
+    assert repository.saved_exchanges[0][1] == f"<{'A' * 64}>: hello"
+
+
+async def test_c2c_message_has_no_sender_prefix() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, FakeChatModel(response="answer"), FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_C2C,
+            event_id="event-1",
+            conversation_id="user-1",
+            content="hello",
+            replies=replies,
+            sender_name="Alice",
+            sender_id="user-123456789",
+        )
+    )
+
+    assert repository.saved_exchanges[0][1] == "hello"
+
+
+async def test_group_message_without_sender_identity_has_no_prefix() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, FakeChatModel(response="answer"), FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_GROUP,
+            event_id="event-1",
+            conversation_id="group-1",
+            content="hello",
+            replies=replies,
+        )
+    )
+
+    assert repository.saved_exchanges[0][1] == "hello"
+
+
+async def test_group_history_replays_sender_prefix() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel(response="answer")
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, model, FakeEventStore())
+
+    for event_id, sender_name, content in (
+        ("event-1", "Alice", "first"),
+        ("event-2", "Bob", "second"),
+    ):
+        await handler.handle(
+            _inbound_message(
+                source=SessionSource.QQ_GROUP,
+                event_id=event_id,
+                conversation_id="group-1",
+                content=content,
+                replies=replies,
+                sender_name=sender_name,
+            )
+        )
+
+    human_contents = [
+        message.content for message in model.last_messages if isinstance(message, HumanMessage)
+    ]
+    assert human_contents == ["<Alice>: first", "<Bob>: second"]
+
+
+async def test_oversized_group_message_does_not_persist_prefixed_content() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    handler = _handler(repository, FakeChatModel(response="answer"), FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_GROUP,
+            event_id="event-1",
+            conversation_id="group-1",
+            content="x" * 32_001,
+            replies=replies,
+            sender_name="Alice",
+        )
+    )
+
+    assert repository.messages == {}
+    assert replies == [("消息过长，请缩短后再试。", 1)]  # noqa: RUF001

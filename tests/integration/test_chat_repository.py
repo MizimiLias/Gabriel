@@ -92,6 +92,31 @@ async def test_qq_sessions_are_hidden_from_default_list(db_session: AsyncSession
     await repository.delete_session(qq_session_id)
 
 
+async def test_session_without_title_round_trips(db_session: AsyncSession) -> None:
+    repository = ChatRepository(db_session)
+    session_id = uuid4()
+
+    await repository.save_exchange(
+        session_id=session_id,
+        user_content="qq",
+        assistant_content="answer",
+        assistant_message_id=uuid4(),
+        source=SessionSource.QQ_GROUP,
+        external_key="app:untitled-group",
+    )
+
+    title, history = await repository.get_history(session_id, 50)
+    assert title is None
+    assert [message.role for message in history] == ["user", "assistant"]
+    assert await repository.get_session_title(session_id) is None
+
+    sessions = await repository.list_sessions(SessionSource.QQ_GROUP)
+    row = next(item for item in sessions if item.session_id == session_id)
+    assert row.title is None
+
+    await repository.delete_session(session_id)
+
+
 async def test_inbound_event_claim_is_idempotent(db_session: AsyncSession) -> None:
     repository = InboundEventRepository(db_session)
     event_id = f"ROBOT1.0_{'x' * 128}"

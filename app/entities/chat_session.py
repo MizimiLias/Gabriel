@@ -31,9 +31,7 @@ class ChatSession(Base):
     session_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    title: Mapped[str] = mapped_column(
-        String(80), nullable=False, default="New chat", server_default="New chat"
-    )
+    title: Mapped[str | None] = mapped_column(String(80), nullable=True)
     source: Mapped[str] = mapped_column(
         String(32),
         nullable=False,

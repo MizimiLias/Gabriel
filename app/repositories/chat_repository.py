@@ -20,7 +20,7 @@ class ChatSessionSummaryRow:
     """Database projection used to build the session sidebar."""
 
     session_id: UUID
-    title: str
+    title: str | None
     source: SessionSource
     created_at: datetime
     updated_at: datetime
@@ -46,18 +46,24 @@ class ChatRepository:
         result = await self._session.scalars(statement)
         return list(reversed(result.all()))
 
-    async def get_history(self, session_id: UUID, limit: int) -> tuple[str, list[ChatMessage]]:
+    async def get_history(
+        self, session_id: UUID, limit: int
+    ) -> tuple[str | None, list[ChatMessage]]:
         """Return a session title and recent history, raising when unknown."""
 
-        title = await self._session.scalar(
-            select(ChatSession.title).where(ChatSession.session_id == session_id)
-        )
-        if title is None:
+        row = (
+            await self._session.execute(
+                select(ChatSession.session_id, ChatSession.title).where(
+                    ChatSession.session_id == session_id
+                )
+            )
+        ).first()
+        if row is None:
             raise ChatSessionNotFoundError("The requested chat session does not exist.")
-        return title, await self.get_recent_messages(session_id, limit)
+        return row.title, await self.get_recent_messages(session_id, limit)
 
     async def get_session_title(self, session_id: UUID) -> str | None:
-        """Return a session title, or None when the session does not exist."""
+        """Return a session title; None means no title or no such session."""
 
         return cast(
             str | None,
@@ -127,7 +133,7 @@ class ChatRepository:
         user_content: str,
         assistant_content: str,
         assistant_message_id: UUID,
-        title: str = "New chat",
+        title: str | None = None,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
     ) -> ChatMessage:

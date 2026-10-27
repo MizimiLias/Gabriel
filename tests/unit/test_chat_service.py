@@ -86,6 +86,36 @@ async def test_title_generation_failure_uses_first_message() -> None:
     assert len(repository.messages[session_id]) == 2
 
 
+@pytest.mark.parametrize("source", [SessionSource.QQ_C2C, SessionSource.QQ_GROUP])
+async def test_non_web_source_skips_title_generation(source: SessionSource) -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    reply = await service.send_message(session_id, "hello", source=source)
+
+    assert reply.title is None
+    assert repository.titles[session_id] is None
+    assert model.title_calls == 0
+
+
+@pytest.mark.parametrize("source", [SessionSource.QQ_C2C, SessionSource.QQ_GROUP])
+async def test_non_web_stream_skips_title_generation(source: SessionSource) -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    events = [event async for event in service.stream_message(session_id, "Hi", source=source)]
+
+    done = events[-1]
+    assert isinstance(done, StreamDone)
+    assert done.title is None
+    assert repository.titles[session_id] is None
+    assert model.title_calls == 0
+
+
 async def test_stream_persists_only_after_completion() -> None:
     repository = FakeChatRepository()
     model = FakeChatModel(chunks=["Hello", " world"])
@@ -130,3 +160,4 @@ async def test_external_session_identity_is_persisted() -> None:
 
     assert repository.sources[session_id] == SessionSource.QQ_C2C
     assert repository.external_keys[session_id] == "app:user"
+    assert repository.titles[session_id] is None
