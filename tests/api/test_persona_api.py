@@ -26,7 +26,7 @@ async def api_client() -> AsyncIterator[AsyncClient]:
     app.dependency_overrides.clear()
 
 
-async def test_create_list_get_patch_replace_and_delete(api_client: AsyncClient) -> None:
+async def test_create_list_get_update_and_delete(api_client: AsyncClient) -> None:
     created = await api_client.post(
         "/api/personas",
         json={
@@ -54,24 +54,43 @@ async def test_create_list_get_patch_replace_and_delete(api_client: AsyncClient)
     assert detail.status_code == 200
     assert detail.json()["system_prompt"] == "You are Ada."
 
-    patched = await api_client.patch(
+    original_ids = [message["id"] for message in detail.json()["messages"]]
+    updated = await api_client.put(
         f"/api/personas/{persona_id}",
-        json={"system_prompt": "You are Ada, briefly."},
+        json={
+            "name": "Ada",
+            "description": None,
+            "system_prompt": "You are Ada, briefly.",
+            "messages": [
+                {"id": original_ids[0], "role": "user", "content": "Who are you?"},
+                {"id": original_ids[1], "role": "assistant", "content": "I am Ada."},
+                {"role": "user", "content": "Be concise."},
+            ],
+        },
     )
-    assert patched.status_code == 200
-    patched_body = patched.json()
-    assert patched_body["name"] == "Ada"
-    assert patched_body["system_prompt"] == "You are Ada, briefly."
-    assert len(patched_body["messages"]) == 2
+    assert updated.status_code == 200
+    updated_body = updated.json()
+    assert updated_body["description"] is None
+    assert updated_body["system_prompt"] == "You are Ada, briefly."
+    assert [message["id"] for message in updated_body["messages"][:2]] == original_ids
+    assert updated_body["messages"][2]["id"] not in original_ids
 
-    replaced = await api_client.put(
-        f"/api/personas/{persona_id}/messages",
-        json={"messages": [{"role": "user", "content": "Hi"}]},
+    trimmed = await api_client.put(
+        f"/api/personas/{persona_id}",
+        json={
+            "name": "Ada",
+            "description": "engineering assistant",
+            "system_prompt": "You are Ada, briefly.",
+            "messages": [
+                {"id": original_ids[0], "role": "user", "content": "Who are you?"},
+            ],
+        },
     )
-    assert replaced.status_code == 200
+    assert trimmed.status_code == 200
     assert [
-        (message["position"], message["content"]) for message in replaced.json()["messages"]
-    ] == [(0, "Hi")]
+        (message["position"], message["content"]) for message in trimmed.json()["messages"]
+    ] == [(0, "Who are you?")]
+    assert trimmed.json()["messages"][0]["id"] == original_ids[0]
 
     deleted = await api_client.delete(f"/api/personas/{persona_id}")
     assert deleted.status_code == 204
@@ -130,26 +149,66 @@ async def test_invalid_payload_returns_422(api_client: AsyncClient) -> None:
     assert too_many.status_code == 422
 
 
-async def test_explicit_null_name_is_rejected(api_client: AsyncClient) -> None:
+async def test_full_update_requires_all_metadata(api_client: AsyncClient) -> None:
     created = await api_client.post(
         "/api/personas",
         json={"name": "Ada", "system_prompt": "You are Ada.", "messages": []},
     )
     persona_id = created.json()["persona_id"]
 
-    response = await api_client.patch(f"/api/personas/{persona_id}", json={"name": None})
+    response = await api_client.put(
+        f"/api/personas/{persona_id}",
+        json={"name": "Ada", "messages": []},
+    )
 
     assert response.status_code == 422
 
 
-async def test_empty_patch_is_a_noop(api_client: AsyncClient) -> None:
+async def test_update_rejects_reordered_existing_messages(api_client: AsyncClient) -> None:
+    created = await api_client.post(
+        "/api/personas",
+        json={
+            "name": "Ada",
+            "system_prompt": "You are Ada.",
+            "messages": [
+                {"role": "user", "content": "one"},
+                {"role": "assistant", "content": "two"},
+            ],
+        },
+    )
+    body = created.json()
+    first, second = body["messages"]
+
+    response = await api_client.put(
+        f"/api/personas/{body['persona_id']}",
+        json={
+            "name": "Ada",
+            "description": None,
+            "system_prompt": "You are Ada.",
+            "messages": [
+                {"id": second["id"], "role": second["role"], "content": second["content"]},
+                {"id": first["id"], "role": first["role"], "content": first["content"]},
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["type"].endswith("persona-validation-error")
+
+
+async def test_removed_partial_update_routes_are_not_available(api_client: AsyncClient) -> None:
     created = await api_client.post(
         "/api/personas",
         json={"name": "Ada", "system_prompt": "You are Ada.", "messages": []},
     )
     persona_id = created.json()["persona_id"]
 
-    response = await api_client.patch(f"/api/personas/{persona_id}", json={})
+    patch_response = await api_client.patch(
+        f"/api/personas/{persona_id}", json={"system_prompt": "Changed"}
+    )
+    messages_response = await api_client.put(
+        f"/api/personas/{persona_id}/messages", json={"messages": []}
+    )
 
-    assert response.status_code == 200
-    assert response.json()["system_prompt"] == "You are Ada."
+    assert patch_response.status_code == 405
+    assert messages_response.status_code == 404

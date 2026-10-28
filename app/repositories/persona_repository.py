@@ -6,13 +6,17 @@ from datetime import UTC, datetime
 from typing import Literal, cast
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, exists, func, select, update
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.entities.persona import Persona
 from app.entities.persona_message import PersonaMessage
-from app.exceptions.chat import PersonaConflictError, PersonaNotFoundError
+from app.exceptions.chat import (
+    PersonaConflictError,
+    PersonaNotFoundError,
+    PersonaValidationError,
+)
 
 PersonaRole = Literal["user", "assistant"]
 
@@ -21,6 +25,15 @@ PersonaRole = Literal["user", "assistant"]
 class PersonaMessageDraft:
     """A preset message supplied by the API before it is stored."""
 
+    role: PersonaRole
+    content: str
+
+
+@dataclass(frozen=True, slots=True)
+class PersonaMessageMutation:
+    """A desired preset message, optionally referencing an existing row."""
+
+    id: UUID | None
     role: PersonaRole
     content: str
 
@@ -171,70 +184,78 @@ class PersonaRepository:
             _raise_conflict(exc)
         return await self._require(persona_id)
 
-    async def update(
+    async def update_with_messages(
         self,
         persona_id: UUID,
         *,
         name: str,
         description: str | None,
         system_prompt: str,
+        messages: Sequence[PersonaMessageMutation],
     ) -> PersonaRecord:
-        """Update persona metadata without touching preset dialogue."""
-
-        statement = (
-            update(Persona)
-            .where(Persona.persona_id == persona_id)
-            .values(
-                name=name,
-                description=description,
-                system_prompt=system_prompt,
-                updated_at=datetime.now(UTC),
-            )
-            .returning(Persona.persona_id)
-        )
-        try:
-            updated = await self._session.scalar(statement)
-            if updated is None:
-                await self._session.rollback()
-                raise PersonaNotFoundError("The requested persona does not exist.")
-            await self._session.commit()
-        except IntegrityError as exc:
-            await self._session.rollback()
-            _raise_conflict(exc)
-        return await self._require(persona_id)
-
-    async def replace_messages(
-        self, persona_id: UUID, messages: Sequence[PersonaMessageDraft]
-    ) -> PersonaRecord:
-        """Replace all preset messages for one persona."""
-
-        if not await self._session.scalar(select(exists().where(Persona.persona_id == persona_id))):
-            raise PersonaNotFoundError("The requested persona does not exist.")
+        """Atomically update metadata and synchronize preset dialogue."""
 
         now = datetime.now(UTC)
         try:
-            await self._session.execute(
-                delete(PersonaMessage).where(PersonaMessage.persona_id == persona_id)
+            persona = await self._session.scalar(
+                select(Persona).where(Persona.persona_id == persona_id).with_for_update()
             )
+            if persona is None:
+                raise PersonaNotFoundError("The requested persona does not exist.")
+
+            existing = list(
+                (
+                    await self._session.scalars(
+                        select(PersonaMessage)
+                        .where(PersonaMessage.persona_id == persona_id)
+                        .order_by(PersonaMessage.position)
+                        .with_for_update()
+                    )
+                ).all()
+            )
+            retained_count = _validate_message_mutations(existing, messages)
+
+            for index in range(retained_count):
+                stored = existing[index]
+                mutation = messages[index]
+                stored.role = mutation.role
+                stored.content = mutation.content
+
+            if retained_count < len(existing):
+                await self._session.execute(
+                    delete(PersonaMessage).where(
+                        PersonaMessage.id.in_([message.id for message in existing[retained_count:]])
+                    )
+                )
+
             self._session.add_all(
                 [
                     PersonaMessage(
                         persona_id=persona_id,
                         position=position,
-                        role=draft.role,
-                        content=draft.content,
+                        role=mutation.role,
+                        content=mutation.content,
                         created_at=now,
                     )
-                    for position, draft in enumerate(messages)
+                    for position, mutation in enumerate(
+                        messages[retained_count:], start=retained_count
+                    )
                 ]
             )
-            await self._session.execute(
-                update(Persona).where(Persona.persona_id == persona_id).values(updated_at=now)
-            )
+            persona.name = name
+            persona.description = description
+            persona.system_prompt = system_prompt
+            persona.updated_at = now
             await self._session.commit()
-        except Exception:
+        except PersonaValidationError:
             await self._session.rollback()
             raise
+        except PersonaNotFoundError:
+            await self._session.rollback()
+            raise
+        except IntegrityError as exc:
+            await self._session.rollback()
+            _raise_conflict(exc)
         return await self._require(persona_id)
 
     async def delete(self, persona_id: UUID) -> None:
@@ -262,3 +283,29 @@ def _raise_conflict(exc: IntegrityError) -> None:
     if constraint == "uq_personas_name" or "uq_personas_name" in detail:
         raise PersonaConflictError("A persona with this name already exists.") from exc
     raise exc
+
+
+def _validate_message_mutations(
+    existing: Sequence[PersonaMessage], mutations: Sequence[PersonaMessageMutation]
+) -> int:
+    """Validate ordered updates and return the count of retained stored messages."""
+
+    seen_ids: set[UUID] = set()
+    retained_count = 0
+    saw_new_message = False
+    for mutation in mutations:
+        if mutation.id is None:
+            saw_new_message = True
+            continue
+        if saw_new_message:
+            raise PersonaValidationError("New preset messages must be appended at the end.")
+        if mutation.id in seen_ids:
+            raise PersonaValidationError("A preset message ID cannot appear more than once.")
+        if retained_count >= len(existing) or existing[retained_count].id != mutation.id:
+            raise PersonaValidationError(
+                "Existing preset messages must keep their original order and may only be "
+                "deleted from the end."
+            )
+        seen_ids.add(mutation.id)
+        retained_count += 1
+    return retained_count

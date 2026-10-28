@@ -10,7 +10,11 @@ from app.personas import (
     MAX_PERSONA_MESSAGES,
     MAX_PERSONA_SYSTEM_PROMPT_LENGTH,
 )
-from app.repositories.persona_repository import PersonaMessageDraft, PersonaRepository
+from app.repositories.persona_repository import (
+    PersonaMessageDraft,
+    PersonaMessageMutation,
+    PersonaRepository,
+)
 from app.services.persona_service import PersonaService
 from tests.support import FakePersonaRepository
 
@@ -47,7 +51,7 @@ async def test_create_rejects_duplicate_name() -> None:
         )
 
 
-async def test_update_keeps_unset_fields_and_messages() -> None:
+async def test_update_preserves_existing_message_ids_and_appends() -> None:
     service = build_service(FakePersonaRepository())
     created = await service.create(
         name="Ada",
@@ -56,46 +60,64 @@ async def test_update_keeps_unset_fields_and_messages() -> None:
         messages=[PersonaMessageDraft(role="user", content="Hi")],
     )
 
-    updated = await service.update(created.persona_id, system_prompt="You are Ada, briefly.")
-    assert updated.name == "Ada"
-    assert updated.description == "original"
-    assert updated.system_prompt == "You are Ada, briefly."
-    assert [message.content for message in updated.messages] == ["Hi"]
-
-    cleared = await service.update(created.persona_id, description=None)
-    assert cleared.description is None
-
-
-async def test_empty_update_returns_current_persona() -> None:
-    service = build_service(FakePersonaRepository())
-    created = await service.create(
-        name="Ada", description=None, system_prompt="You are Ada.", messages=[]
-    )
-
-    unchanged = await service.update(created.persona_id)
-    assert unchanged == created
-
-
-async def test_replace_messages_preserves_order() -> None:
-    service = build_service(FakePersonaRepository())
-    created = await service.create(
-        name="Ada", description=None, system_prompt="You are Ada.", messages=[]
-    )
-
-    replaced = await service.replace_messages(
+    updated = await service.update(
         created.persona_id,
-        [
+        name="Ada",
+        description=None,
+        system_prompt="You are Ada, briefly.",
+        messages=[
+            PersonaMessageMutation(
+                id=created.messages[0].id,
+                role="user",
+                content="Hello again",
+            ),
+            PersonaMessageMutation(
+                id=None,
+                role="assistant",
+                content="Hello!",
+            ),
+        ],
+    )
+    assert updated.name == "Ada"
+    assert updated.description is None
+    assert updated.system_prompt == "You are Ada, briefly."
+    assert updated.messages[0].id == created.messages[0].id
+    assert updated.messages[1].id != created.messages[0].id
+    assert [message.content for message in updated.messages] == ["Hello again", "Hello!"]
+
+
+async def test_update_can_delete_the_tail_and_append() -> None:
+    service = build_service(FakePersonaRepository())
+    created = await service.create(
+        name="Ada",
+        description=None,
+        system_prompt="You are Ada.",
+        messages=[
             PersonaMessageDraft(role="user", content="first"),
             PersonaMessageDraft(role="assistant", content="second"),
-            PersonaMessageDraft(role="user", content="third"),
         ],
     )
 
-    assert [(message.position, message.content) for message in replaced.messages] == [
+    updated = await service.update(
+        created.persona_id,
+        name="Ada",
+        description=None,
+        system_prompt="You are Ada.",
+        messages=[
+            PersonaMessageMutation(
+                id=created.messages[0].id,
+                role="user",
+                content="first",
+            ),
+            PersonaMessageMutation(id=None, role="assistant", content="third"),
+        ],
+    )
+
+    assert [(message.position, message.content) for message in updated.messages] == [
         (0, "first"),
-        (1, "second"),
-        (2, "third"),
+        (1, "third"),
     ]
+    assert updated.messages[0].id == created.messages[0].id
 
 
 async def test_delete_and_missing_persona_errors() -> None:
@@ -109,7 +131,13 @@ async def test_delete_and_missing_persona_errors() -> None:
     with pytest.raises(PersonaNotFoundError):
         await service.get(created.persona_id)
     with pytest.raises(PersonaNotFoundError):
-        await service.update(created.persona_id, system_prompt="Missing.")
+        await service.update(
+            created.persona_id,
+            name="Missing",
+            description=None,
+            system_prompt="Missing.",
+            messages=[],
+        )
     with pytest.raises(PersonaNotFoundError):
         await service.delete(created.persona_id)
 

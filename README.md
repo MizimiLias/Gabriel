@@ -122,12 +122,26 @@ curl -X POST http://127.0.0.1:8086/api/personas \
 
 curl http://127.0.0.1:8086/api/personas
 curl http://127.0.0.1:8086/api/personas/<persona-id>
-curl -X PATCH http://127.0.0.1:8086/api/personas/<persona-id> \
-  -H 'Content-Type: application/json' -d '{"system_prompt":"You are Gabriel, briefly."}'
-curl -X PUT http://127.0.0.1:8086/api/personas/<persona-id>/messages \
-  -H 'Content-Type: application/json' -d '{"messages":[]}'
+curl -X PUT http://127.0.0.1:8086/api/personas/<persona-id> \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "name":"Gabriel",
+    "description":"Default assistant",
+    "system_prompt":"You are Gabriel, briefly.",
+    "messages":[
+      {"id":"<message-id-1>","role":"user","content":"Who are you?"},
+      {"id":"<message-id-2>","role":"assistant","content":"I am Gabriel."},
+      {"role":"user","content":"Be concise."}
+    ]
+  }'
 curl -X DELETE http://127.0.0.1:8086/api/personas/<persona-id>
 ```
+
+A full persona update is atomic. Messages with an existing `id` keep that ID and
+position while their role or content may change. Messages without an `id` are
+appended at the end. Existing IDs may only be omitted from the end; reordering,
+middle deletion, duplicate IDs, and IDs belonging to another persona are
+rejected with a 422 response.
 
 A web session binds a persona on its first message:
 

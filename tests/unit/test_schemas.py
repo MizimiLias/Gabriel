@@ -61,6 +61,51 @@ def test_persona_create_rejects_system_role_preset() -> None:
         )
 
 
-def test_persona_update_rejects_explicit_null_system_prompt() -> None:
+def test_persona_update_requires_full_metadata() -> None:
     with pytest.raises(ValidationError):
-        PersonaUpdate(system_prompt=None)
+        PersonaUpdate.model_validate({"system_prompt": "You are Ada.", "messages": []})
+
+
+def test_persona_update_accepts_existing_and_new_messages() -> None:
+    message_id = uuid4()
+
+    request = PersonaUpdate(
+        name="Ada",
+        description=None,
+        system_prompt="You are Ada.",
+        messages=[
+            {"id": message_id, "role": "user", "content": "Who are you?"},
+            {"role": "assistant", "content": "I am Ada."},
+        ],
+    )
+
+    assert request.messages[0].id == message_id
+    assert request.messages[1].id is None
+
+
+def test_persona_update_rejects_new_message_before_existing_id() -> None:
+    with pytest.raises(ValidationError):
+        PersonaUpdate(
+            name="Ada",
+            description=None,
+            system_prompt="You are Ada.",
+            messages=[
+                {"role": "assistant", "content": "I am Ada."},
+                {"id": uuid4(), "role": "user", "content": "Who are you?"},
+            ],
+        )
+
+
+def test_persona_update_rejects_duplicate_message_ids() -> None:
+    message_id = uuid4()
+
+    with pytest.raises(ValidationError):
+        PersonaUpdate(
+            name="Ada",
+            description=None,
+            system_prompt="You are Ada.",
+            messages=[
+                {"id": message_id, "role": "user", "content": "one"},
+                {"id": message_id, "role": "assistant", "content": "two"},
+            ],
+        )

@@ -13,19 +13,11 @@ from app.personas import (
 )
 from app.repositories.persona_repository import (
     PersonaMessageDraft,
+    PersonaMessageMutation,
     PersonaRecord,
     PersonaRepository,
     PersonaSummaryRow,
 )
-
-
-class _UnsetType:
-    """Sentinel distinguishing an omitted description from an explicit null."""
-
-    __slots__ = ()
-
-
-UNSET = _UnsetType()
 
 
 class PersonaService:
@@ -69,37 +61,21 @@ class PersonaService:
         self,
         persona_id: UUID,
         *,
-        name: str | None = None,
-        description: str | _UnsetType | None = UNSET,
-        system_prompt: str | None = None,
+        name: str,
+        description: str | None,
+        system_prompt: str,
+        messages: Sequence[PersonaMessageMutation],
     ) -> PersonaRecord:
-        """Update provided fields while leaving the rest untouched."""
+        """Atomically update metadata and synchronize preset dialogue."""
 
-        current = await self.get(persona_id)
-        if name is None and system_prompt is None and isinstance(description, _UnsetType):
-            return current
-
-        new_name = current.name if name is None else name
-        new_prompt = current.system_prompt if system_prompt is None else system_prompt
-        new_description = (
-            current.description if isinstance(description, _UnsetType) else description
-        )
-        _validate(name=new_name, system_prompt=new_prompt, messages=())
-        return await self._repository.update(
+        _validate(name=name, system_prompt=system_prompt, messages=messages)
+        return await self._repository.update_with_messages(
             persona_id,
-            name=new_name,
-            description=new_description,
-            system_prompt=new_prompt,
+            name=name,
+            description=description,
+            system_prompt=system_prompt,
+            messages=messages,
         )
-
-    async def replace_messages(
-        self, persona_id: UUID, messages: Sequence[PersonaMessageDraft]
-    ) -> PersonaRecord:
-        """Replace the preset dialogue after validating the limits."""
-
-        await self.get(persona_id)
-        _validate_messages(messages)
-        return await self._repository.replace_messages(persona_id, messages)
 
     async def delete(self, persona_id: UUID) -> None:
         """Delete a persona and let the database clear references."""
@@ -111,7 +87,7 @@ def _validate(
     *,
     name: str,
     system_prompt: str,
-    messages: Sequence[PersonaMessageDraft],
+    messages: Sequence[PersonaMessageDraft | PersonaMessageMutation],
 ) -> None:
     if not name.strip():
         raise PersonaValidationError("A persona name is required.")
@@ -128,7 +104,9 @@ def _validate(
     _validate_messages(messages)
 
 
-def _validate_messages(messages: Sequence[PersonaMessageDraft]) -> None:
+def _validate_messages(
+    messages: Sequence[PersonaMessageDraft | PersonaMessageMutation],
+) -> None:
     if len(messages) > MAX_PERSONA_MESSAGES:
         raise PersonaValidationError(
             f"A persona cannot have more than {MAX_PERSONA_MESSAGES} preset messages."

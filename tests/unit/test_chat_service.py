@@ -11,6 +11,7 @@ from app.prompts import TITLE_SYSTEM_PROMPT
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.persona_repository import (
     PersonaMessageDraft,
+    PersonaMessageMutation,
     PersonaRecord,
     PersonaRepository,
 )
@@ -317,11 +318,19 @@ async def test_persona_edits_are_read_on_the_next_message() -> None:
     session_id = uuid4()
 
     await service.send_message(session_id, "first", persona_id=persona.persona_id)
-    await personas.update(
+    await personas.update_with_messages(
         persona.persona_id,
         name=persona.name,
         description=None,
         system_prompt="You are Ada, briefly.",
+        messages=[
+            PersonaMessageMutation(
+                id=message.id,
+                role=message.role,
+                content=message.content,
+            )
+            for message in persona.messages
+        ],
     )
     await service.send_message(session_id, "second")
 

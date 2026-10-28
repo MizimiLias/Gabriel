@@ -16,11 +16,13 @@ from app.exceptions.chat import (
     ChatSessionNotFoundError,
     PersonaConflictError,
     PersonaNotFoundError,
+    PersonaValidationError,
 )
 from app.prompts import TITLE_SYSTEM_PROMPT
 from app.repositories.chat_repository import ChatSessionMeta, ChatSessionSummaryRow
 from app.repositories.persona_repository import (
     PersonaMessageDraft,
+    PersonaMessageMutation,
     PersonaMessageRecord,
     PersonaRecord,
     PersonaSummaryRow,
@@ -250,13 +252,14 @@ class FakePersonaRepository:
         self.personas[persona_id] = record
         return record
 
-    async def update(
+    async def update_with_messages(
         self,
         persona_id: UUID,
         *,
         name: str,
         description: str | None,
         system_prompt: str,
+        messages: list[PersonaMessageMutation],
     ) -> PersonaRecord:
         current = self.personas.get(persona_id)
         if current is None:
@@ -266,33 +269,52 @@ class FakePersonaRepository:
             for record in self.personas.values()
         ):
             raise PersonaConflictError("A persona with this name already exists.")
+
+        retained_count = 0
+        saw_new_message = False
+        seen_ids: set[UUID] = set()
+        for mutation in messages:
+            if mutation.id is None:
+                saw_new_message = True
+                continue
+            if saw_new_message:
+                raise PersonaValidationError("New preset messages must be appended at the end.")
+            if mutation.id in seen_ids:
+                raise PersonaValidationError("A preset message ID cannot appear more than once.")
+            if (
+                retained_count >= len(current.messages)
+                or current.messages[retained_count].id != mutation.id
+            ):
+                raise PersonaValidationError(
+                    "Existing preset messages must keep their original order."
+                )
+            seen_ids.add(mutation.id)
+            retained_count += 1
+
+        updated_messages = [
+            PersonaMessageRecord(
+                id=current.messages[index].id,
+                position=index,
+                role=mutation.role,
+                content=mutation.content,
+            )
+            for index, mutation in enumerate(messages[:retained_count])
+        ]
+        updated_messages.extend(
+            PersonaMessageRecord(
+                id=uuid4(),
+                position=position,
+                role=mutation.role,
+                content=mutation.content,
+            )
+            for position, mutation in enumerate(messages[retained_count:], start=retained_count)
+        )
         updated = replace(
             current,
             name=name,
             description=description,
             system_prompt=system_prompt,
-            updated_at=datetime.now(UTC),
-        )
-        self.personas[persona_id] = updated
-        return updated
-
-    async def replace_messages(
-        self, persona_id: UUID, messages: list[PersonaMessageDraft]
-    ) -> PersonaRecord:
-        current = self.personas.get(persona_id)
-        if current is None:
-            raise PersonaNotFoundError("The requested persona does not exist.")
-        updated = replace(
-            current,
-            messages=tuple(
-                PersonaMessageRecord(
-                    id=uuid4(),
-                    position=position,
-                    role=draft.role,
-                    content=draft.content,
-                )
-                for position, draft in enumerate(messages)
-            ),
+            messages=tuple(updated_messages),
             updated_at=datetime.now(UTC),
         )
         self.personas[persona_id] = updated

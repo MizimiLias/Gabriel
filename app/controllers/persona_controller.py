@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Path, Response, status
 from app.configs.dependencies import get_persona_service
 from app.repositories.persona_repository import (
     PersonaMessageDraft,
+    PersonaMessageMutation,
     PersonaRecord,
     PersonaSummaryRow,
 )
@@ -15,19 +16,25 @@ from app.schemas.persona import (
     PersonaCreate,
     PersonaListResponse,
     PersonaMessageResponse,
-    PersonaMessagesReplace,
     PersonaResponse,
     PersonaSummaryResponse,
     PersonaUpdate,
 )
-from app.services.persona_service import UNSET, PersonaService
+from app.services.persona_service import PersonaService
 
 router = APIRouter(prefix="/api/personas", tags=["personas"])
 
 
-def _message_drafts(payload: PersonaCreate | PersonaMessagesReplace) -> list[PersonaMessageDraft]:
+def _message_drafts(payload: PersonaCreate) -> list[PersonaMessageDraft]:
     return [
         PersonaMessageDraft(role=message.role, content=message.content)
+        for message in payload.messages
+    ]
+
+
+def _message_mutations(payload: PersonaUpdate) -> list[PersonaMessageMutation]:
+    return [
+        PersonaMessageMutation(id=message.id, role=message.role, content=message.content)
         for message in payload.messages
     ]
 
@@ -99,33 +106,21 @@ async def get_persona(
     return _persona_response(await service.get(persona_id))
 
 
-@router.patch("/{persona_id}", response_model=PersonaResponse)
+@router.put("/{persona_id}", response_model=PersonaResponse)
 async def update_persona(
     persona_id: Annotated[UUID, Path()],
     payload: PersonaUpdate,
     service: Annotated[PersonaService, Depends(get_persona_service)],
 ) -> PersonaResponse:
-    """Update persona metadata without changing preset dialogue."""
+    """Atomically update persona metadata and preset dialogue."""
 
-    description = payload.description if "description" in payload.model_fields_set else UNSET
     record = await service.update(
         persona_id,
         name=payload.name,
-        description=description,
+        description=payload.description,
         system_prompt=payload.system_prompt,
+        messages=_message_mutations(payload),
     )
-    return _persona_response(record)
-
-
-@router.put("/{persona_id}/messages", response_model=PersonaResponse)
-async def replace_persona_messages(
-    persona_id: Annotated[UUID, Path()],
-    payload: PersonaMessagesReplace,
-    service: Annotated[PersonaService, Depends(get_persona_service)],
-) -> PersonaResponse:
-    """Replace all preset dialogue for one persona."""
-
-    record = await service.replace_messages(persona_id, _message_drafts(payload))
     return _persona_response(record)
 
 
