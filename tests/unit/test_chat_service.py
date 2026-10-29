@@ -15,7 +15,7 @@ from app.repositories.persona_repository import (
     PersonaRecord,
     PersonaRepository,
 )
-from app.schemas.content import ImageURL, ImageURLPart
+from app.schemas.content import ImageURL, ImageURLPart, plain_text_from_parts
 from app.services.chat_service import ChatService, StreamDone, StreamStart, StreamToken
 from tests.support import (
     FakeChatModel,
@@ -84,7 +84,74 @@ async def test_system_reminder_is_appended_and_persisted() -> None:
     assert reminder.startswith("<system_reminder>Current datetime: ")
     assert "(Asia/Shanghai), Weekday: " in reminder
     assert reminder.endswith("</system_reminder>")
+    assert "Sender:" not in reminder
     assert repository.messages[session_id][0].parts == stored_parts
+
+
+async def test_sender_identity_is_embedded_in_reminder() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    await service.send_message(
+        session_id,
+        text_parts("hello"),
+        source=SessionSource.QQ_GROUP,
+        sender_name="Alice",
+        sender_id="member-1",
+    )
+
+    stored_parts = repository.saved_exchanges[0][1]
+    assert stored_parts[0] == {"type": "text", "text": "hello"}
+    assert plain_text_from_parts(stored_parts) == "hello"
+    reminder = str(stored_parts[-1]["text"])
+    assert "Sender: Alice (openid: member-1)" in reminder
+    assert repository.messages[session_id][0].parts == stored_parts
+
+    human_message = model.calls[0][-1]
+    assert isinstance(human_message.content, list)
+    assert "Sender: Alice (openid: member-1)" in human_message.content[-1]["text"]
+
+
+async def test_stream_sender_identity_is_embedded_in_reminder() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    _ = [
+        event
+        async for event in service.stream_message(
+            session_id,
+            text_parts("hello"),
+            source=SessionSource.QQ_GROUP,
+            sender_name="Alice",
+            sender_id="member-1",
+        )
+    ]
+
+    reminder = str(repository.saved_exchanges[0][1][-1]["text"])
+    assert "Sender: Alice (openid: member-1)" in reminder
+
+
+async def test_sender_identity_is_sanitized() -> None:
+    repository = FakeChatRepository()
+    model = FakeChatModel()
+    service = build_service(repository=repository, model=model)
+    session_id = uuid4()
+
+    await service.send_message(
+        session_id,
+        text_parts("hello"),
+        source=SessionSource.QQ_GROUP,
+        sender_name="  <Alice>\n\tAdmin  ",
+        sender_id="x" * 200,
+    )
+
+    reminder = str(repository.saved_exchanges[0][1][-1]["text"])
+    assert f"Sender: Alice Admin (openid: {'x' * 127}…)" in reminder
+    assert "<Alice>" not in reminder
 
 
 async def test_image_part_reaches_model_and_is_persisted() -> None:

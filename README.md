@@ -70,8 +70,10 @@ image URLs in the same turn:
 ```
 
 The service appends a persisted `<system_reminder>` text part containing the
-current time in `APP_TIMEZONE` (default `Asia/Shanghai`). Web UI history hides
-this internal part while model requests retain it.
+current time in `APP_TIMEZONE` (default `Asia/Shanghai`). For QQ group messages
+this part also carries the sender display name and OpenID, for example
+`Sender: Alice (openid: member-1)`. Web UI history hides this internal part
+while model requests retain it.
 
 QQ image attachments are forwarded as `image_url` parts using the attachment
 URL returned by the official bot SDK. Other attachment types are ignored.
@@ -194,8 +196,9 @@ and `persona_name` for each session.
 
 `DEFAULT_SYSTEM_PROMPT` and `CHAT_SYSTEM_PROMPT` no longer exist. After
 upgrading, existing sessions have `persona_id = NULL`, so they stop receiving a
-system prompt. The QQ group sender prefix (`username: message`) is not explained
-to the model unless a persona whose system prompt describes it is bound.
+system prompt. QQ group sender attribution lives in the server-appended
+`<system_reminder>` part, not in the user text; a persona system prompt can
+explain that format if needed.
 
 ## QQ official bot
 
@@ -204,6 +207,13 @@ an outbound connection to QQ, so no public callback URL or inbound port is
 required. QQ private chats use one session per user; group chats share one
 session per group. QQ sessions are stored in PostgreSQL but are hidden from the
 default session-list response used by the Web UI.
+
+The official QQ bot API does not expose a real group card or QQ number. Group
+events only provide `author.username` (display name) and `author.member_openid`
+(OpenID), so Gabriel writes `Sender: <username> (openid: <member_openid>)` into
+the per-message `<system_reminder>` part. A missing username degrades to
+`Sender: openid <member_openid>`; C2C messages do not include sender
+attribution.
 
 Set the bot's AppID and AppSecret, then enable the connector:
 

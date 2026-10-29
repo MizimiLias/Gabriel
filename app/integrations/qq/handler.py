@@ -23,8 +23,6 @@ logger = structlog.get_logger(__name__)
 
 _MAX_INPUT_CHARS = 32_000
 _MAX_REPLY_CHARS = 1_500
-_MAX_SENDER_LABEL_CHARS = 64
-_SENDER_ID_FALLBACK_CHARS = 8
 _REPLY_LIMITS = {
     SessionSource.QQ_C2C: 4,
     SessionSource.QQ_GROUP: 5,
@@ -123,25 +121,12 @@ def split_qq_reply(text: str, max_parts: int) -> list[str]:
     return parts
 
 
-def _sanitize_sender_label(value: object) -> str:
-    """Flatten a display name into a safe single-line label."""
-
-    if not isinstance(value, str):
-        return ""
-    collapsed = " ".join(value.split())
-    cleaned = collapsed.replace("<", "").replace(">", "").strip()
-    return cleaned[:_MAX_SENDER_LABEL_CHARS].strip()
-
-
-def _with_sender_prefix(message: QQInboundMessage, content: str) -> str:
-    """Attribute group messages to their sender; C2C content is unchanged."""
+def _group_sender(message: QQInboundMessage) -> tuple[str | None, str | None]:
+    """Only group messages carry per-message sender attribution."""
 
     if message.source != SessionSource.QQ_GROUP:
-        return content
-    label = _sanitize_sender_label(message.sender_name)
-    if not label and isinstance(message.sender_id, str):
-        label = _sanitize_sender_label(message.sender_id[:_SENDER_ID_FALLBACK_CHARS])
-    return f"{label}: {content}" if label else content
+        return None, None
+    return message.sender_name, message.sender_id
 
 
 class QQMessageHandler:
@@ -190,19 +175,17 @@ class QQMessageHandler:
             elif sum(len(text) for text in text_parts) > _MAX_INPUT_CHARS:
                 await self._reply(message, _OVERSIZED_INPUT_MESSAGE)
             else:
-                parts: list[ContentPart] = [
-                    TextPart(
-                        text=_with_sender_prefix(message, text),
-                    )
-                    for text in text_parts
-                ]
+                parts: list[ContentPart] = [TextPart(text=text) for text in text_parts]
                 parts.extend(ImageURLPart(image_url=ImageURL(url=url)) for url in image_urls)
+                sender_name, sender_id = _group_sender(message)
                 async with self._service_scope() as service:
                     reply = await service.send_message(
                         identity.session_id,
                         parts,
                         source=message.source,
                         external_key=identity.external_key,
+                        sender_name=sender_name,
+                        sender_id=sender_id,
                     )
                 reply_text = plain_text_from_parts(reply.message.parts)
                 for sequence, part in enumerate(

@@ -23,6 +23,8 @@ _WEEKDAY_NAMES = (
     "Saturday",
     "Sunday",
 )
+_MAX_REMINDER_SENDER_NAME_CHARS = 64
+_MAX_REMINDER_SENDER_ID_CHARS = 128
 
 
 class TextPart(BaseModel):
@@ -137,25 +139,63 @@ def preview_text_from_parts(parts: Sequence[ContentPart | dict[str, Any]]) -> st
     return ""
 
 
-def append_system_reminder(parts: Sequence[ContentPart], timezone: str) -> list[ContentPart]:
-    """Append the persisted per-message runtime clock reminder.
+def _sanitize_reminder_field(value: object, *, max_chars: int) -> str:
+    """Flatten an untrusted sender attribute into one safe reminder fragment."""
+
+    if not isinstance(value, str):
+        return ""
+    collapsed = " ".join(value.split())
+    cleaned = "".join(character for character in collapsed if character.isprintable())
+    cleaned = cleaned.replace("<", "").replace(">", "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return f"{cleaned[: max_chars - 1].rstrip()}…"
+
+
+def _sender_reminder_line(sender_name: object, sender_id: object) -> str | None:
+    """Format the optional sender attribution line for a reminder."""
+
+    name = _sanitize_reminder_field(sender_name, max_chars=_MAX_REMINDER_SENDER_NAME_CHARS)
+    identifier = _sanitize_reminder_field(sender_id, max_chars=_MAX_REMINDER_SENDER_ID_CHARS)
+    if name and identifier:
+        return f"Sender: {name} (openid: {identifier})"
+    if name:
+        return f"Sender: {name}"
+    if identifier:
+        return f"Sender: openid {identifier}"
+    return None
+
+
+def append_system_reminder(
+    parts: Sequence[ContentPart],
+    timezone: str,
+    *,
+    sender_name: str | None = None,
+    sender_id: str | None = None,
+) -> list[ContentPart]:
+    """Append the persisted per-message runtime clock and sender reminder.
 
     Args:
         parts: User-provided content parts.
         timezone: IANA timezone used to render the current time.
+        sender_name: Optional display name of the message sender.
+        sender_id: Optional platform identifier of the message sender.
 
     Returns:
         A new list containing the original parts followed by one reminder block.
     """
 
     now = datetime.now(ZoneInfo(timezone))
-    reminder = TextPart(
-        text=(
-            f"{SYSTEM_REMINDER_PREFIX}Current datetime: "
-            f"{now.isoformat(timespec='seconds')} ({timezone}), "
-            f"Weekday: {_WEEKDAY_NAMES[now.weekday()]}{SYSTEM_REMINDER_SUFFIX}"
-        )
-    )
+    lines = [
+        f"Current datetime: {now.isoformat(timespec='seconds')} ({timezone}), "
+        f"Weekday: {_WEEKDAY_NAMES[now.weekday()]}"
+    ]
+    sender_line = _sender_reminder_line(sender_name, sender_id)
+    if sender_line is not None:
+        lines.append(sender_line)
+
+    body = "\n".join(lines)
+    reminder = TextPart(text=f"{SYSTEM_REMINDER_PREFIX}{body}{SYSTEM_REMINDER_SUFFIX}")
     return [*parts, reminder]
 
 

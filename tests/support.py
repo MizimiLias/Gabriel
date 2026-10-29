@@ -1,6 +1,6 @@
 """Shared test doubles and settings helpers."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -30,6 +30,8 @@ from app.repositories.persona_repository import (
 from app.schemas.content import (
     ContentPart,
     TextPart,
+    is_system_reminder_text,
+    parse_content_parts,
     plain_text_from_parts,
     preview_text_from_parts,
 )
@@ -47,6 +49,15 @@ def visible_message_text(message: BaseMessage) -> str:
     if isinstance(message.content, str):
         return message.content
     return plain_text_from_parts(message.content)
+
+
+def reminder_text_from_parts(parts: Sequence[ContentPart | dict[str, Any]]) -> str:
+    """Return the injected runtime reminder from a content-part list."""
+
+    for part in parse_content_parts(list(parts)):
+        if isinstance(part, TextPart) and is_system_reminder_text(part.text):
+            return part.text
+    raise AssertionError("system reminder part not found")
 
 
 def make_settings(**overrides: Any) -> Settings:

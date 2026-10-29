@@ -156,12 +156,19 @@ class ChatService:
         *,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
+        sender_name: str | None = None,
+        sender_id: str | None = None,
         persona_id: UUID | None = None,
     ) -> ChatReply:
         """Generate one complete response and persist the successful exchange."""
 
         async with await _get_session_lock(session_id):
-            user_parts = append_system_reminder(parts, self._settings.app_timezone)
+            user_parts = append_system_reminder(
+                parts,
+                self._settings.app_timezone,
+                sender_name=sender_name,
+                sender_id=sender_id,
+            )
             session_meta = await self._repository.get_session_meta(session_id)
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
@@ -203,12 +210,19 @@ class ChatService:
         *,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
+        sender_name: str | None = None,
+        sender_id: str | None = None,
         persona_id: UUID | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """Generate one response as text fragments and persist only on completion."""
 
         async with await _get_session_lock(session_id):
-            user_parts = append_system_reminder(parts, self._settings.app_timezone)
+            user_parts = append_system_reminder(
+                parts,
+                self._settings.app_timezone,
+                sender_name=sender_name,
+                sender_id=sender_id,
+            )
             session_meta = await self._repository.get_session_meta(session_id)
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
