@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import sqlalchemy as sa
 from sqlalchemy import inspect
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -58,6 +59,9 @@ def test_migrations_create_expected_tables() -> None:
     assert isinstance(external_event_id_type, sa.Text)
     persona_id_nullable = asyncio.run(_inspect_persona_id_nullable(TEST_DATABASE_URL))
     assert persona_id_nullable is True
+    chat_message_columns = asyncio.run(_inspect_chat_message_columns(TEST_DATABASE_URL))
+    assert isinstance(chat_message_columns["parts"], JSONB)
+    assert "content" not in chat_message_columns
     assert asyncio.run(_count_personas(TEST_DATABASE_URL)) == 0
 
 
@@ -111,5 +115,19 @@ async def _count_personas(database_url: str) -> int:
     try:
         async with engine.connect() as connection:
             return int(await connection.scalar(sa.text("SELECT count(*) FROM personas")) or 0)
+    finally:
+        await engine.dispose()
+
+
+async def _inspect_chat_message_columns(database_url: str) -> dict[str, object]:
+    engine = create_async_engine(database_url)
+    try:
+        async with engine.connect() as connection:
+            return await connection.run_sync(
+                lambda sync_connection: {
+                    column["name"]: column["type"]
+                    for column in inspect(sync_connection).get_columns("chat_messages")
+                }
+            )
     finally:
         await engine.dispose()

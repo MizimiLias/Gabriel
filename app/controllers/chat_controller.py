@@ -47,7 +47,7 @@ def _message_response(message: ChatMessage) -> ChatMessageResponse:
     return ChatMessageResponse(
         id=message.id,
         role=message.role,
-        content=message.content,
+        parts=message.parts,
         created_at=message.created_at,
     )
 
@@ -74,7 +74,7 @@ async def send_message(
     """Generate one complete assistant response."""
 
     reply = await service.send_message(
-        payload.session_id, payload.message, persona_id=payload.persona_id
+        payload.session_id, payload.parts, persona_id=payload.persona_id
     )
     return ChatResponse(
         session_id=payload.session_id,
@@ -96,7 +96,7 @@ async def stream_message(
     async def events() -> AsyncIterator[ServerSentEvent]:
         try:
             async for event in service.stream_message(
-                payload.session_id, payload.message, persona_id=payload.persona_id
+                payload.session_id, payload.parts, persona_id=payload.persona_id
             ):
                 if isinstance(event, StreamStart):
                     start = StreamStartEvent(

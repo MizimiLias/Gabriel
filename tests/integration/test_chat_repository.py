@@ -16,6 +16,11 @@ from app.repositories.persona_repository import PersonaRepository
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
 
+
+def _text_parts(text: str) -> list[dict[str, str]]:
+    return [{"type": "text", "text": text}]
+
+
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(not TEST_DATABASE_URL, reason="TEST_DATABASE_URL is not set"),
@@ -41,8 +46,8 @@ async def test_save_load_list_rename_and_delete_exchange(db_session: AsyncSessio
 
     await repository.save_exchange(
         session_id=session_id,
-        user_content="hello",
-        assistant_content="hi",
+        user_parts=_text_parts("hello"),
+        assistant_parts=_text_parts("hi"),
         assistant_message_id=uuid4(),
         title="A greeting",
     )
@@ -50,6 +55,8 @@ async def test_save_load_list_rename_and_delete_exchange(db_session: AsyncSessio
     title, history = await repository.get_history(session_id, 50)
     assert title == "A greeting"
     assert [message.role for message in history] == ["user", "assistant"]
+    assert history[0].parts == _text_parts("hello")
+    assert history[1].parts == _text_parts("hi")
 
     sessions = await repository.list_sessions()
     session = next(row for row in sessions if row.session_id == session_id)
@@ -71,14 +78,14 @@ async def test_qq_sessions_are_hidden_from_default_list(db_session: AsyncSession
     qq_session_id = uuid4()
     await repository.save_exchange(
         session_id=web_session_id,
-        user_content="web",
-        assistant_content="answer",
+        user_parts=_text_parts("web"),
+        assistant_parts=_text_parts("answer"),
         assistant_message_id=uuid4(),
     )
     await repository.save_exchange(
         session_id=qq_session_id,
-        user_content="qq",
-        assistant_content="answer",
+        user_parts=_text_parts("qq"),
+        assistant_parts=_text_parts("answer"),
         assistant_message_id=uuid4(),
         source=SessionSource.QQ_GROUP,
         external_key="app:group",
@@ -101,8 +108,8 @@ async def test_session_without_title_round_trips(db_session: AsyncSession) -> No
 
     await repository.save_exchange(
         session_id=session_id,
-        user_content="qq",
-        assistant_content="answer",
+        user_parts=_text_parts("qq"),
+        assistant_parts=_text_parts("answer"),
         assistant_message_id=uuid4(),
         source=SessionSource.QQ_GROUP,
         external_key="app:untitled-group",
@@ -160,8 +167,8 @@ async def test_persona_is_persisted_only_when_session_is_created(
 
     await repository.save_exchange(
         session_id=session_id,
-        user_content="hello",
-        assistant_content="hi",
+        user_parts=_text_parts("hello"),
+        assistant_parts=_text_parts("hi"),
         assistant_message_id=uuid4(),
         persona_id=first.persona_id,
     )
@@ -172,8 +179,8 @@ async def test_persona_is_persisted_only_when_session_is_created(
 
     await repository.save_exchange(
         session_id=session_id,
-        user_content="again",
-        assistant_content="hi again",
+        user_parts=_text_parts("again"),
+        assistant_parts=_text_parts("hi again"),
         assistant_message_id=uuid4(),
         persona_id=second.persona_id,
     )
@@ -211,8 +218,8 @@ async def test_list_sessions_exposes_persona_name(db_session: AsyncSession) -> N
 
     await repository.save_exchange(
         session_id=session_id,
-        user_content="hello",
-        assistant_content="hi",
+        user_parts=_text_parts("hello"),
+        assistant_parts=_text_parts("hi"),
         assistant_message_id=uuid4(),
         persona_id=persona.persona_id,
     )

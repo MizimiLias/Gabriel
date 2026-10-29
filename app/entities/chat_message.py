@@ -1,6 +1,7 @@
 """Chat message entity."""
 
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -11,8 +12,8 @@ from sqlalchemy import (
     Identity,
     Index,
     String,
-    Text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,6 +26,10 @@ class ChatMessage(Base):
     __tablename__ = "chat_messages"
     __table_args__ = (
         CheckConstraint("role IN ('user', 'assistant')", name="valid_role"),
+        CheckConstraint(
+            "jsonb_typeof(parts) = 'array' AND jsonb_array_length(parts) > 0",
+            name="parts_array",
+        ),
         Index("ix_chat_messages_session_sequence", "session_id", "sequence"),
     )
 
@@ -38,7 +43,7 @@ class ChatMessage(Base):
 
     role: Mapped[str] = mapped_column(String(16), nullable=False)
 
-    content: Mapped[str] = mapped_column(Text, nullable=False)
+    parts: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)

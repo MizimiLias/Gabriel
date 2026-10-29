@@ -4,9 +4,10 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.entities.chat_session import SessionSource
+from app.schemas.content import ContentPart, TextPart
 
 
 class ChatRequest(BaseModel):
@@ -15,8 +16,17 @@ class ChatRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     session_id: UUID
-    message: str = Field(min_length=1, max_length=32_000)
+    parts: list[ContentPart] = Field(min_length=1)
     persona_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_total_text_length(self) -> ChatRequest:
+        """Keep one request within the legacy total text budget."""
+
+        total = sum(len(part.text) for part in self.parts if isinstance(part, TextPart))
+        if total > 32_000:
+            raise ValueError("Text parts exceed the 32000 character limit.")
+        return self
 
 
 class ChatMessageResponse(BaseModel):
@@ -26,7 +36,7 @@ class ChatMessageResponse(BaseModel):
 
     id: UUID
     role: Literal["user", "assistant"]
-    content: str
+    parts: list[ContentPart]
     created_at: datetime
 
 

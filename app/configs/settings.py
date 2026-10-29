@@ -2,8 +2,9 @@
 
 from functools import lru_cache
 from typing import Literal
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
 
@@ -24,6 +25,7 @@ class Settings(BaseSettings):
     app_port: int = Field(default=8086, ge=1, le=65535)
     app_log_level: str = "INFO"
     app_docs_enabled: bool = True
+    app_timezone: str = "Asia/Shanghai"
 
     db_host: str = "localhost"
     db_port: int = Field(default=5432, ge=1, le=65535)
@@ -55,6 +57,17 @@ class Settings(BaseSettings):
     rag_vector_table: str = "vector_store"
     rag_vector_index_type: Literal["HNSW", "IVFFlat"] = "HNSW"
     rag_vector_distance: Literal["cosine", "l2", "inner_product"] = "cosine"
+
+    @field_validator("app_timezone")
+    @classmethod
+    def validate_app_timezone(cls, value: str) -> str:
+        """Require a valid IANA timezone identifier."""
+
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone: {value}") from exc
+        return value
 
     @model_validator(mode="after")
     def validate_optional_integrations(self) -> Settings:

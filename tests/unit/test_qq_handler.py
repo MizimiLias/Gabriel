@@ -14,6 +14,7 @@ from app.integrations.qq.handler import (
     resolve_qq_session,
     split_qq_reply,
 )
+from app.schemas.content import plain_text_from_parts
 from app.services.chat_service import ChatService
 from tests.support import FakeChatModel, FakeChatRepository, make_settings
 
@@ -51,7 +52,7 @@ def _inbound_message(
     conversation_id: str,
     content: str,
     replies: list[tuple[str, int]],
-    has_attachments: bool = False,
+    image_urls: tuple[str, ...] = (),
     sender_name: str | None = None,
     sender_id: str | None = None,
 ) -> QQInboundMessage:
@@ -63,8 +64,8 @@ def _inbound_message(
         source=source,
         event_id=event_id,
         conversation_id=conversation_id,
-        content=content,
-        has_attachments=has_attachments,
+        text_parts=(content,),
+        image_urls=image_urls,
         reply=reply,
         sender_name=sender_name,
         sender_id=sender_id,
@@ -204,13 +205,61 @@ async def test_empty_or_attachment_message_does_not_call_model() -> None:
             conversation_id="group-1",
             content="   ",
             replies=replies,
-            has_attachments=True,
+            image_urls=(),
         )
     )
 
     assert repository.messages == {}
-    assert replies == [("目前仅支持文本消息。", 1)]
+    assert replies == [("目前仅支持文本和图片消息。", 1)]
     assert store.statuses[(SessionSource.QQ_GROUP, "event-1")] == "completed"
+
+
+async def test_text_and_image_parts_are_passed_to_service() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    model = FakeChatModel(response="answer")
+    handler = _handler(repository, model, FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_C2C,
+            event_id="event-image",
+            conversation_id="user-1",
+            content="describe this",
+            image_urls=("https://example.com/image.png",),
+            replies=replies,
+        )
+    )
+
+    stored_parts = repository.saved_exchanges[0][1]
+    assert stored_parts[0] == {"type": "text", "text": "describe this"}
+    assert stored_parts[1] == {
+        "type": "image_url",
+        "image_url": {"url": "https://example.com/image.png"},
+    }
+    assert stored_parts[-1]["type"] == "text"
+
+
+async def test_image_only_message_is_processed() -> None:
+    repository = FakeChatRepository()
+    replies: list[tuple[str, int]] = []
+    model = FakeChatModel(response="answer")
+    handler = _handler(repository, model, FakeEventStore())
+
+    await handler.handle(
+        _inbound_message(
+            source=SessionSource.QQ_C2C,
+            event_id="event-image-only",
+            conversation_id="user-1",
+            content="",
+            image_urls=("https://example.com/image.png",),
+            replies=replies,
+        )
+    )
+
+    assert len(repository.saved_exchanges) == 1
+    assert repository.saved_exchanges[0][1][0]["type"] == "image_url"
+    assert replies == [("answer", 1)]
 
 
 async def test_upstream_failure_sends_fallback_without_persisting() -> None:
@@ -279,7 +328,7 @@ async def test_group_message_content_includes_sender_name() -> None:
         )
     )
 
-    assert repository.saved_exchanges[0][1] == "<Alice>: hello"
+    assert plain_text_from_parts(repository.saved_exchanges[0][1]) == "Alice: hello"
 
 
 async def test_group_message_falls_back_to_sender_id() -> None:
@@ -298,7 +347,7 @@ async def test_group_message_falls_back_to_sender_id() -> None:
         )
     )
 
-    assert repository.saved_exchanges[0][1] == "<member-1>: hello"
+    assert plain_text_from_parts(repository.saved_exchanges[0][1]) == "member-1: hello"
 
 
 async def test_sender_name_is_sanitized() -> None:
@@ -317,7 +366,7 @@ async def test_sender_name_is_sanitized() -> None:
         )
     )
 
-    assert repository.saved_exchanges[0][1] == "<Alice Admin>: hello"
+    assert plain_text_from_parts(repository.saved_exchanges[0][1]) == "Alice Admin: hello"
 
 
 async def test_sender_name_is_truncated() -> None:
@@ -336,7 +385,7 @@ async def test_sender_name_is_truncated() -> None:
         )
     )
 
-    assert repository.saved_exchanges[0][1] == f"<{'A' * 64}>: hello"
+    assert plain_text_from_parts(repository.saved_exchanges[0][1]) == f"{'A' * 64}: hello"
 
 
 async def test_c2c_message_has_no_sender_prefix() -> None:
@@ -356,7 +405,7 @@ async def test_c2c_message_has_no_sender_prefix() -> None:
         )
     )
 
-    assert repository.saved_exchanges[0][1] == "hello"
+    assert plain_text_from_parts(repository.saved_exchanges[0][1]) == "hello"
 
 
 async def test_group_message_without_sender_identity_has_no_prefix() -> None:
@@ -374,7 +423,7 @@ async def test_group_message_without_sender_identity_has_no_prefix() -> None:
         )
     )
 
-    assert repository.saved_exchanges[0][1] == "hello"
+    assert plain_text_from_parts(repository.saved_exchanges[0][1]) == "hello"
 
 
 async def test_group_history_replays_sender_prefix() -> None:
@@ -399,9 +448,11 @@ async def test_group_history_replays_sender_prefix() -> None:
         )
 
     human_contents = [
-        message.content for message in model.last_messages if isinstance(message, HumanMessage)
+        plain_text_from_parts(message.content)
+        for message in model.last_messages
+        if isinstance(message, HumanMessage)
     ]
-    assert human_contents == ["<Alice>: first", "<Bob>: second"]
+    assert human_contents == ["Alice: first", "Bob: second"]
 
 
 async def test_oversized_group_message_does_not_persist_prefixed_content() -> None:

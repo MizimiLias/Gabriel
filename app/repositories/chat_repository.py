@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import delete, exists, func, select, update
@@ -14,6 +14,7 @@ from app.entities.chat_session import ChatSession, SessionSource
 from app.entities.inbound_event import InboundEvent
 from app.entities.persona import Persona
 from app.exceptions.chat import ChatSessionNotFoundError
+from app.schemas.content import preview_text_from_parts
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,8 +124,8 @@ class ChatRepository:
             .correlate(ChatSession)
             .scalar_subquery()
         )
-        latest_message = (
-            select(ChatMessage.content)
+        latest_parts = (
+            select(ChatMessage.parts)
             .where(ChatMessage.session_id == ChatSession.session_id)
             .order_by(ChatMessage.sequence.desc())
             .limit(1)
@@ -141,7 +142,7 @@ class ChatRepository:
                 ChatSession.created_at,
                 ChatSession.updated_at,
                 message_count.label("message_count"),
-                func.coalesce(func.left(latest_message, 160), "").label("last_message_preview"),
+                latest_parts.label("latest_parts"),
             )
             .outerjoin(Persona, Persona.persona_id == ChatSession.persona_id)
             .where(ChatSession.source == source.value)
@@ -156,7 +157,9 @@ class ChatRepository:
                 created_at=row.created_at,
                 updated_at=row.updated_at,
                 message_count=row.message_count,
-                last_message_preview=row.last_message_preview,
+                last_message_preview=preview_text_from_parts(
+                    cast(list[dict[str, Any]], row.latest_parts or [])
+                )[:160],
                 persona_id=row.persona_id,
                 persona_name=row.persona_name,
             )
@@ -167,8 +170,8 @@ class ChatRepository:
         self,
         *,
         session_id: UUID,
-        user_content: str,
-        assistant_content: str,
+        user_parts: list[dict[str, Any]],
+        assistant_parts: list[dict[str, Any]],
         assistant_message_id: UUID,
         title: str | None = None,
         source: SessionSource = SessionSource.WEB,
@@ -198,14 +201,14 @@ class ChatRepository:
         user_message = ChatMessage(
             session_id=session_id,
             role="user",
-            content=user_content,
+            parts=user_parts,
             created_at=now,
         )
         assistant_message = ChatMessage(
             id=assistant_message_id,
             session_id=session_id,
             role="assistant",
-            content=assistant_content,
+            parts=assistant_parts,
             created_at=now,
         )
 

@@ -70,3 +70,8 @@ def test_qq_enabled_accepts_complete_configuration() -> None:
 
     assert settings.qq_bot_app_id == "app-id"
     assert settings.qq_bot_app_secret is not None
+
+
+def test_invalid_app_timezone_is_rejected() -> None:
+    with pytest.raises(ValidationError, match="Unknown timezone"):
+        make_settings(app_timezone="Mars/Olympus_Mons")

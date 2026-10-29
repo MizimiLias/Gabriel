@@ -18,6 +18,10 @@ from tests.support import (
 )
 
 
+def _text_parts(text: str) -> list[dict[str, str]]:
+    return [{"type": "text", "text": text}]
+
+
 @pytest.fixture
 async def api_context() -> AsyncIterator[
     tuple[AsyncClient, FakeChatRepository, FakePersonaRepository]
@@ -53,10 +57,11 @@ async def test_json_chat_history_and_delete(api_client: AsyncClient) -> None:
     session_id = str(uuid4())
 
     response = await api_client.post(
-        "/api/chat", json={"session_id": session_id, "message": "Remember this"}
+        "/api/chat",
+        json={"session_id": session_id, "parts": _text_parts("Remember this")},
     )
     assert response.status_code == 200
-    assert response.json()["message"]["content"] == "Stored answer"
+    assert response.json()["message"]["parts"] == _text_parts("Stored answer")
     assert response.json()["title"] == "Remembering details"
     assert response.headers["X-Request-ID"]
 
@@ -70,6 +75,13 @@ async def test_json_chat_history_and_delete(api_client: AsyncClient) -> None:
     assert history.status_code == 200
     assert history.json()["title"] == "Remembering details"
     assert [message["role"] for message in history.json()["messages"]] == ["user", "assistant"]
+    assert history.json()["messages"][0]["parts"][0] == {
+        "type": "text",
+        "text": "Remember this",
+    }
+    assert history.json()["messages"][0]["parts"][-1]["text"].startswith(
+        "<system_reminder>Current datetime: "
+    )
 
     renamed = await api_client.patch(
         f"/api/chat/sessions/{session_id}", json={"title": "  A better title  "}
@@ -94,7 +106,11 @@ async def test_rename_missing_session_returns_problem_detail(api_client: AsyncCl
 async def test_validation_problem_detail(api_client: AsyncClient) -> None:
     response = await api_client.post(
         "/api/chat",
-        json={"session_id": str(uuid4()), "message": "hello", "extra": True},
+        json={
+            "session_id": str(uuid4()),
+            "parts": _text_parts("hello"),
+            "extra": True,
+        },
     )
 
     assert response.status_code == 422
@@ -102,10 +118,42 @@ async def test_validation_problem_detail(api_client: AsyncClient) -> None:
     assert response.json()["request_id"] != "unknown"
 
 
+async def test_legacy_message_field_is_rejected(api_client: AsyncClient) -> None:
+    response = await api_client.post(
+        "/api/chat",
+        json={"session_id": str(uuid4()), "message": "hello"},
+    )
+
+    assert response.status_code == 422
+
+
+async def test_json_chat_accepts_text_and_image_parts(
+    api_context: tuple[AsyncClient, FakeChatRepository, FakePersonaRepository],
+) -> None:
+    client, repository, _personas = api_context
+    session_id = uuid4()
+    image_part = {
+        "type": "image_url",
+        "image_url": {"url": "https://example.com/image.png"},
+    }
+
+    response = await client.post(
+        "/api/chat",
+        json={
+            "session_id": str(session_id),
+            "parts": [*_text_parts("Describe this"), image_part],
+        },
+    )
+
+    assert response.status_code == 200
+    assert repository.messages[session_id][0].parts[1] == image_part
+    assert repository.saved_exchanges[0][1][1] == image_part
+
+
 async def test_stream_event_order(api_client: AsyncClient) -> None:
     response = await api_client.post(
         "/api/chat/stream",
-        json={"session_id": str(uuid4()), "message": "Stream this"},
+        json={"session_id": str(uuid4()), "parts": _text_parts("Stream this")},
     )
 
     assert response.status_code == 200
@@ -131,14 +179,14 @@ async def test_session_list_hides_qq_sessions_by_default(
     qq_session_id = uuid4()
     await repository.save_exchange(
         session_id=web_session_id,
-        user_content="web",
-        assistant_content="answer",
+        user_parts=_text_parts("web"),
+        assistant_parts=_text_parts("answer"),
         assistant_message_id=uuid4(),
     )
     await repository.save_exchange(
         session_id=qq_session_id,
-        user_content="qq",
-        assistant_content="answer",
+        user_parts=_text_parts("qq"),
+        assistant_parts=_text_parts("answer"),
         assistant_message_id=uuid4(),
         source=SessionSource.QQ_GROUP,
         external_key="app:group",
@@ -171,7 +219,7 @@ async def test_chat_persona_id_is_persisted_and_listed(
         "/api/chat",
         json={
             "session_id": str(session_id),
-            "message": "hello",
+            "parts": _text_parts("hello"),
             "persona_id": str(persona.persona_id),
         },
     )
@@ -190,7 +238,7 @@ async def test_stream_unknown_persona_emits_error_event(api_client: AsyncClient)
         "/api/chat/stream",
         json={
             "session_id": str(uuid4()),
-            "message": "hello",
+            "parts": _text_parts("hello"),
             "persona_id": str(uuid4()),
         },
     )

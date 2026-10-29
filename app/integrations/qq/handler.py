@@ -10,6 +10,13 @@ import structlog
 
 from app.entities.chat_session import SessionSource
 from app.exceptions.chat import ChatUpstreamError
+from app.schemas.content import (
+    ContentPart,
+    ImageURL,
+    ImageURLPart,
+    TextPart,
+    plain_text_from_parts,
+)
 from app.services.chat_service import ChatService
 
 logger = structlog.get_logger(__name__)
@@ -22,7 +29,7 @@ _REPLY_LIMITS = {
     SessionSource.QQ_C2C: 4,
     SessionSource.QQ_GROUP: 5,
 }
-_UNSUPPORTED_MESSAGE = "目前仅支持文本消息。"
+_UNSUPPORTED_MESSAGE = "目前仅支持文本和图片消息。"
 _OVERSIZED_INPUT_MESSAGE = "消息过长，请缩短后再试。"  # noqa: RUF001
 _UPSTREAM_ERROR_MESSAGE = "Gabriel 暂时无法回复，请稍后再试。"  # noqa: RUF001
 _TRUNCATED_SUFFIX = "\n\n…（内容过长，已截断）"  # noqa: RUF001
@@ -52,8 +59,8 @@ class QQInboundMessage:
     source: SessionSource
     event_id: str
     conversation_id: str
-    content: str
-    has_attachments: bool
+    text_parts: tuple[str, ...]
+    image_urls: tuple[str, ...]
     reply: ReplyFunction
     sender_name: str | None = None
     sender_id: str | None = None
@@ -176,22 +183,30 @@ class QQMessageHandler:
 
         identity = resolve_qq_session(self._app_id, message.source, message.conversation_id)
         try:
-            content = message.content.strip()
-            if not content:
+            text_parts = tuple(text.strip() for text in message.text_parts if text.strip())
+            image_urls = tuple(url.strip() for url in message.image_urls if url.strip())
+            if not text_parts and not image_urls:
                 await self._reply(message, _UNSUPPORTED_MESSAGE)
-            elif len(content) > _MAX_INPUT_CHARS:
+            elif sum(len(text) for text in text_parts) > _MAX_INPUT_CHARS:
                 await self._reply(message, _OVERSIZED_INPUT_MESSAGE)
             else:
-                user_content = _with_sender_prefix(message, content)
+                parts: list[ContentPart] = [
+                    TextPart(
+                        text=_with_sender_prefix(message, text),
+                    )
+                    for text in text_parts
+                ]
+                parts.extend(ImageURLPart(image_url=ImageURL(url=url)) for url in image_urls)
                 async with self._service_scope() as service:
                     reply = await service.send_message(
                         identity.session_id,
-                        user_content,
+                        parts,
                         source=message.source,
                         external_key=identity.external_key,
                     )
+                reply_text = plain_text_from_parts(reply.message.parts)
                 for sequence, part in enumerate(
-                    split_qq_reply(reply.message.content, _REPLY_LIMITS[message.source]),
+                    split_qq_reply(reply_text, _REPLY_LIMITS[message.source]),
                     start=1,
                 ):
                     await message.reply(part, sequence)

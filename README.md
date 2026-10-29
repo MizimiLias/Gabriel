@@ -40,7 +40,7 @@ Send a JSON chat request:
 ```bash
 curl -X POST http://127.0.0.1:8086/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","message":"My name is Ada."}'
+  -d '{"session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","parts":[{"type":"text","text":"My name is Ada."}]}'
 ```
 
 Send a follow-up using the same `session_id` to use persisted conversation
@@ -50,7 +50,37 @@ memory. Stream a response with:
 curl -N -X POST http://127.0.0.1:8086/api/chat/stream \
   -H 'Content-Type: application/json' \
   -H 'Accept: text/event-stream' \
-  -d '{"session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","message":"What is my name?"}'
+  -d '{"session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","parts":[{"type":"text","text":"What is my name?"}]}'
+```
+
+Chat messages are content-part arrays. Web callers may send text and HTTP(S)
+image URLs in the same turn:
+
+```json
+{
+  "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "parts": [
+    {"type": "text", "text": "Describe this image."},
+    {
+      "type": "image_url",
+      "image_url": {"url": "https://example.com/image.png"}
+    }
+  ]
+}
+```
+
+The service appends a persisted `<system_reminder>` text part containing the
+current time in `APP_TIMEZONE` (default `Asia/Shanghai`). Web UI history hides
+this internal part while model requests retain it.
+
+QQ image attachments are forwarded as `image_url` parts using the attachment
+URL returned by the official bot SDK. Other attachment types are ignored.
+
+This API is intentionally breaking: the legacy `message` field is rejected.
+Upgrade existing databases first:
+
+```bash
+uv run alembic upgrade head
 ```
 
 List Web sessions, ordered by most recent activity:
@@ -148,7 +178,7 @@ A web session binds a persona on its first message:
 ```bash
 curl -X POST http://127.0.0.1:8086/api/chat \
   -H 'Content-Type: application/json' \
-  -d '{"session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","message":"Hello","persona_id":"<persona-id>"}'
+  -d '{"session_id":"3fa85f64-5717-4562-b3fc-2c963f66afa6","parts":[{"type":"text","text":"Hello"}],"persona_id":"<persona-id>"}'
 ```
 
 There is no API for switching a persona mid-session. Update the database

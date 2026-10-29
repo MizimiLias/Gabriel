@@ -22,6 +22,14 @@ from app.repositories.chat_repository import (
     ChatSessionSummaryRow,
 )
 from app.repositories.persona_repository import PersonaRecord, PersonaRepository
+from app.schemas.content import (
+    ContentPart,
+    append_system_reminder,
+    assistant_text_parts,
+    content_parts_for_model,
+    dump_content_parts,
+    preview_text_from_parts,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -144,7 +152,7 @@ class ChatService:
     async def send_message(
         self,
         session_id: UUID,
-        message: str,
+        parts: list[ContentPart],
         *,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
@@ -153,6 +161,7 @@ class ChatService:
         """Generate one complete response and persist the successful exchange."""
 
         async with await _get_session_lock(session_id):
+            user_parts = append_system_reminder(parts, self._settings.app_timezone)
             session_meta = await self._repository.get_session_meta(session_id)
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
@@ -162,20 +171,23 @@ class ChatService:
                 requested_persona_id=persona_id,
             )
             existing_title = session_meta.title if session_meta is not None else None
-            response = await self._invoke(self._build_messages(history, message, context.persona))
+            response = await self._invoke(
+                self._build_messages(history, user_parts, context.persona)
+            )
             if not response:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
+            user_text = preview_text_from_parts(user_parts)
             title = await self._resolve_title(
                 source=source,
                 existing_title=existing_title,
-                user_content=message,
+                user_content=user_text,
                 assistant_content=response,
             )
             stored_message = await self._repository.save_exchange(
                 session_id=session_id,
-                user_content=message,
-                assistant_content=response,
+                user_parts=dump_content_parts(user_parts),
+                assistant_parts=dump_content_parts(assistant_text_parts(response)),
                 assistant_message_id=uuid4(),
                 title=title,
                 source=source,
@@ -187,7 +199,7 @@ class ChatService:
     async def stream_message(
         self,
         session_id: UUID,
-        message: str,
+        parts: list[ContentPart],
         *,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
@@ -196,6 +208,7 @@ class ChatService:
         """Generate one response as text fragments and persist only on completion."""
 
         async with await _get_session_lock(session_id):
+            user_parts = append_system_reminder(parts, self._settings.app_timezone)
             session_meta = await self._repository.get_session_meta(session_id)
             history = await self._repository.get_recent_messages(
                 session_id, self._settings.chat_context_message_limit
@@ -205,7 +218,7 @@ class ChatService:
                 requested_persona_id=persona_id,
             )
             existing_title = session_meta.title if session_meta is not None else None
-            messages = self._build_messages(history, message, context.persona)
+            messages = self._build_messages(history, user_parts, context.persona)
             assistant_message_id = uuid4()
             fragments: list[str] = []
             yield StreamStart(session_id=session_id, message_id=assistant_message_id)
@@ -236,16 +249,17 @@ class ChatService:
             if not content:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
+            user_text = preview_text_from_parts(user_parts)
             title = await self._resolve_title(
                 source=source,
                 existing_title=existing_title,
-                user_content=message,
+                user_content=user_text,
                 assistant_content=content,
             )
             stored_message = await self._repository.save_exchange(
                 session_id=session_id,
-                user_content=message,
-                assistant_content=content,
+                user_parts=dump_content_parts(user_parts),
+                assistant_parts=dump_content_parts(assistant_text_parts(content)),
                 assistant_message_id=assistant_message_id,
                 title=title,
                 source=source,
@@ -371,7 +385,7 @@ class ChatService:
     def _build_messages(
         self,
         history: list[ChatMessage],
-        message: str,
+        parts: list[ContentPart],
         persona: PersonaRecord | None,
     ) -> list[BaseMessage]:
         messages: list[BaseMessage] = []
@@ -383,9 +397,10 @@ class ChatService:
                 else:
                     messages.append(AIMessage(content=preset.content))
         for stored_message in history:
+            content = content_parts_for_model(stored_message.parts)
             if stored_message.role == "user":
-                messages.append(HumanMessage(content=stored_message.content))
+                messages.append(HumanMessage(content=content))
             else:
-                messages.append(AIMessage(content=stored_message.content))
-        messages.append(HumanMessage(content=message))
+                messages.append(AIMessage(content=content))
+        messages.append(HumanMessage(content=content_parts_for_model(parts)))
         return messages

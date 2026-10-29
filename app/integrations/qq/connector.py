@@ -83,8 +83,8 @@ class QQBotClient(botpy.Client):
                 source=SessionSource.QQ_GROUP,
                 event_id=message.id,
                 conversation_id=message.group_openid,
-                content=message.content or "",
-                has_attachments=bool(message.attachments),
+                text_parts=(message.content or "",),
+                image_urls=self._image_urls(message.attachments),
                 reply=self._reply_callback(message),
                 sender_name=getattr(message, "author_name", None),
                 sender_id=getattr(message.author, "member_openid", None),
@@ -97,18 +97,50 @@ class QQBotClient(botpy.Client):
                 source=SessionSource.QQ_C2C,
                 event_id=message.id,
                 conversation_id=message.author.user_openid,
-                content=message.content or "",
-                has_attachments=bool(message.attachments),
+                text_parts=(message.content or "",),
+                image_urls=self._image_urls(message.attachments),
                 reply=self._reply_callback(message),
             )
         )
+
+    @staticmethod
+    def _image_urls(attachments: object) -> tuple[str, ...]:
+        """Extract accessible image URLs from botpy attachment objects."""
+
+        if not isinstance(attachments, list):
+            return ()
+        urls: list[str] = []
+        for attachment in attachments:
+            content_type = getattr(attachment, "content_type", None)
+            url = getattr(attachment, "url", None)
+            if (
+                isinstance(content_type, str)
+                and content_type.startswith("image/")
+                and isinstance(url, str)
+                and url.strip()
+            ):
+                urls.append(url.strip())
+        return tuple(urls)
 
     @staticmethod
     def _reply_callback(
         message: GroupMessage | C2CMessage,
     ) -> Callable[[str, int], Awaitable[object]]:
         async def reply(content: str, sequence: int) -> object:
-            return await message.reply(content=content, msg_seq=sequence)
+            try:
+                return await message.reply(
+                    markdown={"content": content},
+                    msg_type=2,
+                    msg_seq=sequence,
+                )
+            except botpy.errors.ServerError as exc:
+                if "不允许发送原生 markdown" not in str(exc):
+                    raise
+                return await message.reply(
+                    content=content,
+                    msg_type=0,
+                    msg_seq=sequence,
+                )
 
         return reply
 

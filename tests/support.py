@@ -27,6 +27,26 @@ from app.repositories.persona_repository import (
     PersonaRecord,
     PersonaSummaryRow,
 )
+from app.schemas.content import (
+    ContentPart,
+    TextPart,
+    plain_text_from_parts,
+    preview_text_from_parts,
+)
+
+
+def text_parts(text: str) -> list[ContentPart]:
+    """Build one text part for service-level tests."""
+
+    return [TextPart(text=text)]
+
+
+def visible_message_text(message: BaseMessage) -> str:
+    """Extract visible text from a LangChain message, excluding reminders."""
+
+    if isinstance(message.content, str):
+        return message.content
+    return plain_text_from_parts(message.content)
 
 
 def make_settings(**overrides: Any) -> Settings:
@@ -98,7 +118,7 @@ class FakeChatRepository:
         self.external_keys: dict[UUID, str | None] = {}
         self.persona_ids: dict[UUID, UUID | None] = {}
         self.persona_names: dict[UUID, str] = {}
-        self.saved_exchanges: list[tuple[UUID, str, str]] = []
+        self.saved_exchanges: list[tuple[UUID, list[dict[str, Any]], list[dict[str, Any]]]] = []
 
     async def get_recent_messages(self, session_id: UUID, limit: int) -> list[ChatMessage]:
         return self.messages.get(session_id, [])[-limit:]
@@ -142,7 +162,7 @@ class FakeChatRepository:
                     created_at=messages[0].created_at,
                     updated_at=last_message.created_at,
                     message_count=len(messages),
-                    last_message_preview=last_message.content[:160],
+                    last_message_preview=preview_text_from_parts(last_message.parts)[:160],
                     persona_id=persona_id,
                     persona_name=(
                         self.persona_names.get(persona_id) if persona_id is not None else None
@@ -155,8 +175,8 @@ class FakeChatRepository:
         self,
         *,
         session_id: UUID,
-        user_content: str,
-        assistant_content: str,
+        user_parts: list[dict[str, Any]],
+        assistant_parts: list[dict[str, Any]],
         assistant_message_id: UUID,
         title: str | None = None,
         source: SessionSource = SessionSource.WEB,
@@ -168,14 +188,14 @@ class FakeChatRepository:
             id=uuid4(),
             session_id=session_id,
             role="user",
-            content=user_content,
+            parts=user_parts,
             created_at=now,
         )
         assistant_message = ChatMessage(
             id=assistant_message_id,
             session_id=session_id,
             role="assistant",
-            content=assistant_content,
+            parts=assistant_parts,
             created_at=now,
         )
         self.messages.setdefault(session_id, []).extend([user_message, assistant_message])
@@ -183,7 +203,7 @@ class FakeChatRepository:
         self.sources.setdefault(session_id, source)
         self.external_keys.setdefault(session_id, external_key)
         self.persona_ids.setdefault(session_id, persona_id)
-        self.saved_exchanges.append((session_id, user_content, assistant_content))
+        self.saved_exchanges.append((session_id, user_parts, assistant_parts))
         return assistant_message
 
     async def update_session_title(self, session_id: UUID, title: str) -> ChatSessionSummaryRow:

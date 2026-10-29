@@ -32,7 +32,11 @@ async def failing_client() -> AsyncIterator[AsyncClient]:
 
 async def test_json_upstream_failure_returns_502(failing_client: AsyncClient) -> None:
     response = await failing_client.post(
-        "/api/chat", json={"session_id": str(uuid4()), "message": "hello"}
+        "/api/chat",
+        json={
+            "session_id": str(uuid4()),
+            "parts": [{"type": "text", "text": "hello"}],
+        },
     )
 
     assert response.status_code == 502
@@ -42,7 +46,10 @@ async def test_json_upstream_failure_returns_502(failing_client: AsyncClient) ->
 async def test_stream_upstream_failure_emits_error_event(failing_client: AsyncClient) -> None:
     response = await failing_client.post(
         "/api/chat/stream",
-        json={"session_id": str(uuid4()), "message": "hello"},
+        json={
+            "session_id": str(uuid4()),
+            "parts": [{"type": "text", "text": "hello"}],
+        },
     )
 
     assert response.status_code == 200
