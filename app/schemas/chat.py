@@ -1,13 +1,13 @@
 """Chat API request and response schemas."""
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.entities.chat_session import SessionSource
-from app.schemas.content import ContentPart, TextPart
+from app.schemas.content import ContentPart, StoredContentPart, TextPart
 
 
 class ChatRequest(BaseModel):
@@ -35,8 +35,8 @@ class ChatMessageResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: UUID
-    role: Literal["user", "assistant"]
-    parts: list[ContentPart]
+    role: Literal["user", "assistant", "tool"]
+    parts: list[StoredContentPart]
     created_at: datetime
 
 
@@ -115,6 +115,28 @@ class StreamReasoningEvent(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     delta: str
+
+
+class StreamToolCallEvent(BaseModel):
+    """One tool invocation requested by the model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str
+    name: str
+    args: dict[str, Any]
+    text: str | None = None
+
+
+class StreamToolResultEvent(BaseModel):
+    """The completed result of one tool invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_call_id: str
+    name: str
+    content: str
+    is_error: bool = False
 
 
 class StreamDoneEvent(BaseModel):

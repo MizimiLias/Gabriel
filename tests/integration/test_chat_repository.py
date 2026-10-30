@@ -11,7 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from app.entities.chat_session import SessionSource
 from app.entities.inbound_event import InboundEvent
 from app.exceptions.chat import ChatSessionNotFoundError
-from app.repositories.chat_repository import ChatRepository, InboundEventRepository
+from app.repositories.chat_repository import (
+    ChatRepository,
+    InboundEventRepository,
+    StoredMessageDraft,
+)
 from app.repositories.persona_repository import PersonaRepository
 
 TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL")
@@ -70,6 +74,47 @@ async def test_save_load_list_rename_and_delete_exchange(db_session: AsyncSessio
     await repository.delete_session(session_id)
     with pytest.raises(ChatSessionNotFoundError):
         await repository.get_history(session_id, 50)
+
+
+async def test_save_exchange_persists_tool_trace(db_session: AsyncSession) -> None:
+    repository = ChatRepository(db_session)
+    session_id = uuid4()
+    assistant_message_id = uuid4()
+    tool_call = {
+        "type": "tool_call",
+        "id": "call-1",
+        "name": "get_weather",
+        "args": {"city": "北京"},
+    }
+    tool_result = {
+        "type": "tool_result",
+        "tool_call_id": "call-1",
+        "name": "get_weather",
+        "content": "晴 20 度",
+        "is_error": False,
+    }
+
+    await repository.save_exchange(
+        session_id=session_id,
+        user_parts=_text_parts("weather?"),
+        assistant_parts=_text_parts("sunny"),
+        assistant_message_id=assistant_message_id,
+        title="Weather",
+        trace_messages=[
+            StoredMessageDraft(role="assistant", parts=[tool_call]),
+            StoredMessageDraft(role="tool", parts=[tool_result]),
+        ],
+    )
+
+    _title, history = await repository.get_history(session_id, 50)
+
+    assert [message.role for message in history] == ["user", "assistant", "tool", "assistant"]
+    assert history[1].parts == [tool_call]
+    assert history[2].parts == [tool_result]
+    assert history[3].id == assistant_message_id
+    assert history[3].parts == _text_parts("sunny")
+
+    await repository.delete_session(session_id)
 
 
 async def test_qq_sessions_are_hidden_from_default_list(db_session: AsyncSession) -> None:

@@ -21,11 +21,11 @@ from app.entities.base import Base
 
 
 class ChatMessage(Base):
-    """A persisted user or assistant message."""
+    """A persisted user, assistant, or tool message."""
 
     __tablename__ = "chat_messages"
     __table_args__ = (
-        CheckConstraint("role IN ('user', 'assistant')", name="valid_role"),
+        CheckConstraint("role IN ('user', 'assistant', 'tool')", name="valid_role"),
         CheckConstraint(
             "jsonb_typeof(parts) = 'array' AND jsonb_array_length(parts) > 0",
             name="parts_array",

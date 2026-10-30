@@ -1,8 +1,9 @@
 """Persistence operations for chat sessions and messages."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from sqlalchemy import delete, exists, func, select, update
@@ -39,6 +40,14 @@ class ChatSessionMeta:
     title: str | None
     source: SessionSource
     persona_id: UUID | None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredMessageDraft:
+    """One intermediate agent message persisted inside a turn."""
+
+    role: Literal["assistant", "tool"]
+    parts: list[dict[str, Any]]
 
 
 class ChatRepository:
@@ -173,12 +182,13 @@ class ChatRepository:
         user_parts: list[dict[str, Any]],
         assistant_parts: list[dict[str, Any]],
         assistant_message_id: UUID,
+        trace_messages: Sequence[StoredMessageDraft] = (),
         title: str | None = None,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
         persona_id: UUID | None = None,
     ) -> ChatMessage:
-        """Atomically create the session when needed and store one completed exchange."""
+        """Atomically store one completed turn and return its final assistant message."""
 
         now = datetime.now(UTC)
         upsert_session = (
@@ -204,6 +214,15 @@ class ChatRepository:
             parts=user_parts,
             created_at=now,
         )
+        trace_rows = [
+            ChatMessage(
+                session_id=session_id,
+                role=draft.role,
+                parts=draft.parts,
+                created_at=now,
+            )
+            for draft in trace_messages
+        ]
         assistant_message = ChatMessage(
             id=assistant_message_id,
             session_id=session_id,
@@ -214,7 +233,7 @@ class ChatRepository:
 
         try:
             await self._session.execute(upsert_session)
-            self._session.add_all([user_message, assistant_message])
+            self._session.add_all([user_message, *trace_rows, assistant_message])
             await self._session.commit()
         except Exception:
             await self._session.rollback()

@@ -235,6 +235,57 @@ uv run uvicorn app.main:app --host 127.0.0.1 --port 8086 --workers 1
 the flag require a service restart. Keep exactly one Uvicorn worker while QQ is
 enabled; multiple workers would create duplicate QQ WebSocket connections.
 
+## MCP tools
+
+Gabriel can call tools exposed by external MCP servers. Tools are discovered at
+startup with LangChain's `MCPAdapter` and injected into a `create_agent` loop, so
+the model can call them before producing its answer. Tools are global: every
+persona and channel (Web and QQ) shares the same set, and the set is loaded once
+at startup, so restart the service after editing `mcp.json`.
+
+Servers are configured in `mcp.json` at the repository root:
+
+```json
+{
+  "mcpServers": {
+    "weather": {
+      "command": "node",
+      "args": ["/path/to/weather-mcp-server/dist/index.js"],
+      "env": { "AMAP_API_KEY": "..." }
+    }
+  }
+}
+```
+
+`mcp.json` is git-ignored because it usually contains credentials; start from
+`mcp.example.json`. Both stdio servers (`command`/`args`/`env`/`cwd`) and remote
+servers (`url`/`headers`/`transport`) are supported. Then enable MCP:
+
+```dotenv
+MCP_ENABLED=true
+MCP_CONFIG_PATH=mcp.json
+MCP_ALLOWED_TOOLS=
+```
+
+`MCP_ALLOWED_TOOLS` is an optional comma-separated allowlist of tool names
+(server-prefixed names such as `weather_get_weather` also match); empty exposes
+every discovered tool. Invalid configuration fails startup, while an unreachable
+server only logs a warning and Gabriel keeps running without tools.
+
+Tool activity stays in the conversation as memory: the intermediate assistant
+message with `tool_call` parts and the matching `role="tool"` results are
+persisted and replayed to the model on later turns.
+`GET /api/chat/sessions/{id}/messages` returns them, and
+`POST /api/chat/stream` emits `tool_call` and `tool_result` SSE events.
+Reasoning fragments are still never persisted.
+
+MCP servers run as local processes with the service's privileges and their
+output is untrusted. Keep Gabriel bound to loopback, only register servers you
+control, and prefer read-only tools. QQ is a public channel, so
+`QQ_MCP_ENABLED=false` is the default: QQ conversations use the plain model
+unless you explicitly set `QQ_MCP_ENABLED=true`. The loopback-only Web API is
+unaffected.
+
 ## Configuration
 
 Environment variables are documented in `.env.example`. `RAG_ENABLED` is
@@ -255,6 +306,13 @@ URL such as `postgresql+asyncpg://postgres@localhost/gabriel_db_test`. The live
 provider test is opt-in with `RUN_PROVIDER_TESTS=true`. Apply
 `uv run alembic upgrade head` to the test database before running the
 repository integration test.
+
+The weather MCP round trip is opt-in as well:
+
+```bash
+cd /path/to/weather-mcp-server && npm run build
+cd /path/to/Gabriel && RUN_MCP_TESTS=true uv run pytest tests/integration/test_mcp_weather.py
+```
 
 ## Deployment
 

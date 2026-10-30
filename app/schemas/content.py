@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+from langchain_core.messages import AIMessage, ToolMessage
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator
 
 SYSTEM_REMINDER_PREFIX = "<system_reminder>"
@@ -63,13 +64,41 @@ class ImageURLPart(BaseModel):
     image_url: ImageURL
 
 
+class ToolCallPart(BaseModel):
+    """One tool invocation requested by the model."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["tool_call"] = "tool_call"
+    id: str
+    name: str
+    args: dict[str, Any]
+
+
+class ToolResultPart(BaseModel):
+    """The text result returned by one tool invocation."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["tool_result"] = "tool_result"
+    tool_call_id: str
+    name: str
+    content: str
+    is_error: bool = False
+
+
 type ContentPart = Annotated[TextPart | ImageURLPart, Field(discriminator="type")]
+type StoredContentPart = Annotated[
+    TextPart | ImageURLPart | ToolCallPart | ToolResultPart,
+    Field(discriminator="type"),
+]
 
 _CONTENT_PARTS_ADAPTER = TypeAdapter(list[ContentPart])
+_STORED_PARTS_ADAPTER = TypeAdapter(list[StoredContentPart])
 
 
 def parse_content_parts(value: object) -> list[ContentPart]:
-    """Validate and normalize persisted or API-provided content parts.
+    """Validate and normalize API-provided content parts.
 
     Args:
         value: Raw JSON-compatible content parts.
@@ -81,18 +110,28 @@ def parse_content_parts(value: object) -> list[ContentPart]:
     return _CONTENT_PARTS_ADAPTER.validate_python(value)
 
 
-def dump_content_parts(parts: Sequence[ContentPart]) -> list[dict[str, Any]]:
+def parse_stored_parts(value: object) -> list[StoredContentPart]:
+    """Validate and normalize persisted content parts, including tool traces."""
+
+    return _STORED_PARTS_ADAPTER.validate_python(value)
+
+
+def dump_content_parts(parts: Sequence[StoredContentPart]) -> list[dict[str, Any]]:
     """Serialize content parts for PostgreSQL JSONB storage."""
 
     return [part.model_dump(mode="json") for part in parts]
 
 
 def content_parts_for_model(
-    parts: Sequence[ContentPart | dict[str, Any]],
+    parts: Sequence[StoredContentPart | dict[str, Any]],
 ) -> list[str | dict[Any, Any]]:
-    """Convert stored parts to the content array accepted by LangChain/OpenAI."""
+    """Convert stored text/image parts to the content array accepted by LangChain/OpenAI."""
 
-    return [part.model_dump(mode="json") for part in parse_content_parts(list(parts))]
+    return [
+        part.model_dump(mode="json")
+        for part in parse_stored_parts(list(parts))
+        if isinstance(part, (TextPart, ImageURLPart))
+    ]
 
 
 def is_system_reminder_text(value: str) -> bool:
@@ -102,7 +141,7 @@ def is_system_reminder_text(value: str) -> bool:
 
 
 def plain_text_from_parts(
-    parts: Sequence[ContentPart | dict[str, Any]],
+    parts: Sequence[StoredContentPart | dict[str, Any]],
     *,
     include_system_reminders: bool = False,
 ) -> str:
@@ -117,7 +156,7 @@ def plain_text_from_parts(
     """
 
     texts: list[str] = []
-    for part in parse_content_parts(list(parts)):
+    for part in parse_stored_parts(list(parts)):
         if not isinstance(part, TextPart):
             continue
         if not include_system_reminders and is_system_reminder_text(part.text):
@@ -127,10 +166,10 @@ def plain_text_from_parts(
     return "\n\n".join(texts)
 
 
-def preview_text_from_parts(parts: Sequence[ContentPart | dict[str, Any]]) -> str:
+def preview_text_from_parts(parts: Sequence[StoredContentPart | dict[str, Any]]) -> str:
     """Return a concise text preview, falling back to an image marker."""
 
-    parsed = parse_content_parts(list(parts))
+    parsed = parse_stored_parts(list(parts))
     text = plain_text_from_parts(parsed)
     if text:
         return text
@@ -203,3 +242,26 @@ def assistant_text_parts(text: str) -> list[ContentPart]:
     """Build the normal single-text-part representation of an assistant reply."""
 
     return [TextPart(text=text)]
+
+
+def parts_from_trace_message(message: AIMessage | ToolMessage) -> list[StoredContentPart]:
+    """Convert one intermediate agent message into persisted content parts."""
+
+    if isinstance(message, ToolMessage):
+        return [
+            ToolResultPart(
+                tool_call_id=message.tool_call_id,
+                name=message.name or "",
+                content=message.text,
+                is_error=getattr(message, "status", None) == "error",
+            )
+        ]
+
+    parts: list[StoredContentPart] = []
+    if message.text:
+        parts.append(TextPart(text=message.text))
+    parts.extend(
+        ToolCallPart(id=call["id"] or "", name=call["name"], args=call["args"])
+        for call in message.tool_calls
+    )
+    return parts

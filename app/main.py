@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.configs.agent import initialize_chat_agent
 from app.configs.database import dispose_engine
 from app.configs.logging import configure_logging
 from app.configs.settings import get_settings
@@ -20,7 +21,9 @@ from app.middleware import RequestContextMiddleware
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     """Manage application-level resource lifecycles."""
 
-    connector_manager = build_connector_manager(get_settings())
+    settings = get_settings()
+    await initialize_chat_agent(settings)
+    connector_manager = build_connector_manager(settings)
     await connector_manager.start()
     try:
         yield

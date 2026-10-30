@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 
+from app.agents.runtime import AgentEvent, AgentResult
 from app.configs.settings import Settings
 from app.entities.chat_message import ChatMessage
 from app.entities.chat_session import SessionSource
@@ -19,7 +20,11 @@ from app.exceptions.chat import (
     PersonaValidationError,
 )
 from app.prompts import TITLE_SYSTEM_PROMPT
-from app.repositories.chat_repository import ChatSessionMeta, ChatSessionSummaryRow
+from app.repositories.chat_repository import (
+    ChatSessionMeta,
+    ChatSessionSummaryRow,
+    StoredMessageDraft,
+)
 from app.repositories.persona_repository import (
     PersonaMessageDraft,
     PersonaMessageMutation,
@@ -119,6 +124,38 @@ class FakeChatModel:
         return cast(BaseChatModel, self)
 
 
+class FakeChatAgent:
+    """Agent double that replays a scripted result or event stream."""
+
+    def __init__(
+        self,
+        *,
+        result: AgentResult | None = None,
+        events: list[AgentEvent] | None = None,
+        fail: bool = False,
+    ) -> None:
+        self.result = result or AgentResult(text="Agent answer", trace=[])
+        self.events = events or []
+        self.fail = fail
+        self.calls: list[list[BaseMessage]] = []
+        self.last_messages: list[BaseMessage] = []
+
+    async def invoke(self, messages: list[BaseMessage]) -> AgentResult:
+        self.last_messages = messages
+        self.calls.append(messages)
+        if self.fail:
+            raise RuntimeError("agent failed")
+        return self.result
+
+    async def stream(self, messages: list[BaseMessage]) -> AsyncIterator[AgentEvent]:
+        self.last_messages = messages
+        self.calls.append(messages)
+        if self.fail:
+            raise RuntimeError("agent failed")
+        for event in self.events:
+            yield event
+
+
 class FakeChatRepository:
     """In-memory repository matching the interface used by ChatService."""
 
@@ -130,6 +167,7 @@ class FakeChatRepository:
         self.persona_ids: dict[UUID, UUID | None] = {}
         self.persona_names: dict[UUID, str] = {}
         self.saved_exchanges: list[tuple[UUID, list[dict[str, Any]], list[dict[str, Any]]]] = []
+        self.saved_traces: list[list[StoredMessageDraft]] = []
 
     async def get_recent_messages(self, session_id: UUID, limit: int) -> list[ChatMessage]:
         return self.messages.get(session_id, [])[-limit:]
@@ -189,6 +227,7 @@ class FakeChatRepository:
         user_parts: list[dict[str, Any]],
         assistant_parts: list[dict[str, Any]],
         assistant_message_id: UUID,
+        trace_messages: Sequence[StoredMessageDraft] = (),
         title: str | None = None,
         source: SessionSource = SessionSource.WEB,
         external_key: str | None = None,
@@ -202,6 +241,17 @@ class FakeChatRepository:
             parts=user_parts,
             created_at=now,
         )
+        trace_messages = list(trace_messages)
+        trace_rows = [
+            ChatMessage(
+                id=uuid4(),
+                session_id=session_id,
+                role=draft.role,
+                parts=draft.parts,
+                created_at=now,
+            )
+            for draft in trace_messages
+        ]
         assistant_message = ChatMessage(
             id=assistant_message_id,
             session_id=session_id,
@@ -209,12 +259,15 @@ class FakeChatRepository:
             parts=assistant_parts,
             created_at=now,
         )
-        self.messages.setdefault(session_id, []).extend([user_message, assistant_message])
+        self.messages.setdefault(session_id, []).extend(
+            [user_message, *trace_rows, assistant_message]
+        )
         self.titles.setdefault(session_id, title)
         self.sources.setdefault(session_id, source)
         self.external_keys.setdefault(session_id, external_key)
         self.persona_ids.setdefault(session_id, persona_id)
         self.saved_exchanges.append((session_id, user_parts, assistant_parts))
+        self.saved_traces.append(trace_messages)
         return assistant_message
 
     async def update_session_title(self, session_id: UUID, title: str) -> ChatSessionSummaryRow:

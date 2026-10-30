@@ -26,6 +26,8 @@ from app.schemas.chat import (
     StreamReasoningEvent,
     StreamStartEvent,
     StreamTokenEvent,
+    StreamToolCallEvent,
+    StreamToolResultEvent,
 )
 from app.schemas.error import SSEErrorEvent
 from app.services.chat_service import (
@@ -34,6 +36,8 @@ from app.services.chat_service import (
     StreamReasoning,
     StreamStart,
     StreamToken,
+    StreamToolCalls,
+    StreamToolResult,
 )
 
 logger = structlog.get_logger(__name__)
@@ -42,7 +46,7 @@ router = APIRouter(prefix="/api/chat", tags=["chat"])
 
 
 def _message_response(message: ChatMessage) -> ChatMessageResponse:
-    if message.role not in {"user", "assistant"}:
+    if message.role not in {"user", "assistant", "tool"}:
         raise ValueError(f"Unsupported persisted message role: {message.role}")
     return ChatMessageResponse(
         id=message.id,
@@ -114,6 +118,25 @@ async def stream_message(
                         event="reasoning",
                         data=StreamReasoningEvent(delta=event.delta).model_dump_json(),
                     )
+                elif isinstance(event, StreamToolCalls):
+                    for call in event.calls:
+                        tool_call_event = StreamToolCallEvent(
+                            tool_call_id=call["id"] or "",
+                            name=call["name"],
+                            args=call["args"],
+                            text=event.text or None,
+                        )
+                        yield ServerSentEvent(
+                            event="tool_call", data=tool_call_event.model_dump_json()
+                        )
+                elif isinstance(event, StreamToolResult):
+                    result = StreamToolResultEvent(
+                        tool_call_id=event.tool_call_id,
+                        name=event.name,
+                        content=event.content,
+                        is_error=event.is_error,
+                    )
+                    yield ServerSentEvent(event="tool_result", data=result.model_dump_json())
                 elif isinstance(event, StreamDone):
                     done = StreamDoneEvent(
                         session_id=event.session_id,

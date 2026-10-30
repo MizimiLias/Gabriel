@@ -9,8 +9,18 @@ from uuid import UUID, uuid4
 
 import structlog
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages.tool import ToolCall
 
+from app.agents.runtime import (
+    AgentReasoning,
+    AgentResult,
+    AgentToken,
+    AgentToolCalls,
+    AgentToolResult,
+    ChatAgent,
+    extract_reasoning_delta,
+)
 from app.configs.settings import Settings
 from app.entities.chat_message import ChatMessage
 from app.entities.chat_session import SessionSource
@@ -20,14 +30,19 @@ from app.repositories.chat_repository import (
     ChatRepository,
     ChatSessionMeta,
     ChatSessionSummaryRow,
+    StoredMessageDraft,
 )
 from app.repositories.persona_repository import PersonaRecord, PersonaRepository
 from app.schemas.content import (
     ContentPart,
+    ToolCallPart,
+    ToolResultPart,
     append_system_reminder,
     assistant_text_parts,
     content_parts_for_model,
     dump_content_parts,
+    parse_stored_parts,
+    parts_from_trace_message,
     preview_text_from_parts,
 )
 
@@ -68,6 +83,24 @@ class StreamReasoning:
 
 
 @dataclass(frozen=True, slots=True)
+class StreamToolCalls:
+    """Internal tool-call request marker."""
+
+    calls: tuple[ToolCall, ...]
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamToolResult:
+    """Internal completed tool invocation marker."""
+
+    tool_call_id: str
+    name: str
+    content: str
+    is_error: bool
+
+
+@dataclass(frozen=True, slots=True)
 class StreamDone:
     """Internal stream completion marker."""
 
@@ -85,32 +118,9 @@ class ChatReply:
     title: str | None
 
 
-type StreamEvent = StreamStart | StreamToken | StreamReasoning | StreamDone
-
-
-def _extract_reasoning_delta(chunk: object) -> str:
-    """Extract one reasoning_content fragment from a streamed chunk."""
-
-    candidates: list[object] = []
-    additional = getattr(chunk, "additional_kwargs", None)
-    if isinstance(additional, dict):
-        candidates.append(additional.get("reasoning_content"))
-        candidates.append(additional.get("reasoning"))
-    metadata = getattr(chunk, "response_metadata", None)
-    if isinstance(metadata, dict):
-        candidates.append(metadata.get("reasoning_content"))
-        candidates.append(metadata.get("reasoning"))
-    # Some OpenAI-compatible gateways expose it as a direct attribute.
-    candidates.append(getattr(chunk, "reasoning_content", None))
-
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate:
-            return candidate
-        if isinstance(candidate, list):
-            parts = [part for part in candidate if isinstance(part, str) and part]
-            if parts:
-                return "".join(parts)
-    return ""
+type StreamEvent = (
+    StreamStart | StreamToken | StreamReasoning | StreamToolCalls | StreamToolResult | StreamDone
+)
 
 
 def _normalise_title(value: str) -> str:
@@ -124,6 +134,80 @@ def _normalise_title(value: str) -> str:
 
 def _fallback_title(message: str) -> str:
     return _normalise_title(message) or "New chat"
+
+
+def _has_tool_calls(stored: ChatMessage) -> bool:
+    """Return whether a stored assistant message requested tools."""
+
+    return any(isinstance(part, ToolCallPart) for part in parse_stored_parts(stored.parts))
+
+
+def _message_from_stored(stored: ChatMessage) -> BaseMessage:
+    """Rebuild one LangChain message from its persisted content parts."""
+
+    parts = parse_stored_parts(stored.parts)
+    if stored.role == "tool":
+        result = next((part for part in parts if isinstance(part, ToolResultPart)), None)
+        if result is None:
+            raise ValueError("Stored tool message has no tool result part.")
+        return ToolMessage(
+            content=result.content,
+            tool_call_id=result.tool_call_id,
+            name=result.name,
+            status="error" if result.is_error else "success",
+        )
+
+    if stored.role == "assistant":
+        tool_calls: list[ToolCall] = [
+            {"id": part.id, "name": part.name, "args": part.args, "type": "tool_call"}
+            for part in parts
+            if isinstance(part, ToolCallPart)
+        ]
+        content = content_parts_for_model(parts)
+        return AIMessage(content=content if content else "", tool_calls=tool_calls)
+
+    return HumanMessage(content=content_parts_for_model(parts))
+
+
+def _trace_drafts(messages: list[AIMessage | ToolMessage]) -> list[StoredMessageDraft]:
+    """Convert intermediate agent messages into persistable drafts."""
+
+    drafts = [
+        StoredMessageDraft(
+            role="tool" if isinstance(message, ToolMessage) else "assistant",
+            parts=dump_content_parts(parts_from_trace_message(message)),
+        )
+        for message in messages
+    ]
+    return [draft for draft in drafts if draft.parts]
+
+
+def _tool_call_draft(text: str, calls: tuple[ToolCall, ...]) -> StoredMessageDraft:
+    """Build the assistant draft for one completed tool-calling model step."""
+
+    message = AIMessage(content=text, tool_calls=list(calls))
+    return StoredMessageDraft(
+        role="assistant",
+        parts=dump_content_parts(parts_from_trace_message(message)),
+    )
+
+
+def _tool_result_draft(event: AgentToolResult) -> StoredMessageDraft:
+    """Build the tool draft for one completed tool invocation."""
+
+    return StoredMessageDraft(
+        role="tool",
+        parts=dump_content_parts(
+            [
+                ToolResultPart(
+                    tool_call_id=event.tool_call_id,
+                    name=event.name,
+                    content=event.content,
+                    is_error=event.is_error,
+                )
+            ]
+        ),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,11 +227,13 @@ class ChatService:
         model: BaseChatModel,
         settings: Settings,
         persona_repository: PersonaRepository | None = None,
+        agent: ChatAgent | None = None,
     ) -> None:
         self._repository = repository
         self._model = model
         self._settings = settings
         self._persona_repository = persona_repository
+        self._agent = agent
 
     async def send_message(
         self,
@@ -178,9 +264,14 @@ class ChatService:
                 requested_persona_id=persona_id,
             )
             existing_title = session_meta.title if session_meta is not None else None
-            response = await self._invoke(
-                self._build_messages(history, user_parts, context.persona)
-            )
+            messages = self._build_messages(history, user_parts, context.persona)
+            trace: list[StoredMessageDraft] = []
+            if self._agent is None:
+                response = await self._invoke(messages)
+            else:
+                result = await self._invoke_agent(messages)
+                response = result.text
+                trace = _trace_drafts(result.trace)
             if not response:
                 raise ChatUpstreamError("The language model returned an empty response.")
 
@@ -196,6 +287,7 @@ class ChatService:
                 user_parts=dump_content_parts(user_parts),
                 assistant_parts=dump_content_parts(assistant_text_parts(response)),
                 assistant_message_id=uuid4(),
+                trace_messages=trace,
                 title=title,
                 source=source,
                 external_key=external_key,
@@ -235,17 +327,38 @@ class ChatService:
             messages = self._build_messages(history, user_parts, context.persona)
             assistant_message_id = uuid4()
             fragments: list[str] = []
+            trace: list[StoredMessageDraft] = []
             yield StreamStart(session_id=session_id, message_id=assistant_message_id)
 
             try:
-                async for chunk in self._model.astream(messages):
-                    reasoning = _extract_reasoning_delta(chunk)
-                    if reasoning:
-                        yield StreamReasoning(delta=reasoning)
-                    text = chunk.text
-                    if text:
-                        fragments.append(text)
-                        yield StreamToken(delta=text)
+                if self._agent is None:
+                    async for chunk in self._model.astream(messages):
+                        reasoning = extract_reasoning_delta(chunk)
+                        if reasoning:
+                            yield StreamReasoning(delta=reasoning)
+                        text = chunk.text
+                        if text:
+                            fragments.append(text)
+                            yield StreamToken(delta=text)
+                else:
+                    async for event in self._agent.stream(messages):
+                        if isinstance(event, AgentToken):
+                            fragments.append(event.delta)
+                            yield StreamToken(delta=event.delta)
+                        elif isinstance(event, AgentReasoning):
+                            yield StreamReasoning(delta=event.delta)
+                        elif isinstance(event, AgentToolCalls):
+                            yield StreamToolCalls(calls=event.calls, text=event.text)
+                            trace.append(_tool_call_draft(event.text, event.calls))
+                            fragments.clear()
+                        elif isinstance(event, AgentToolResult):
+                            yield StreamToolResult(
+                                tool_call_id=event.tool_call_id,
+                                name=event.name,
+                                content=event.content,
+                                is_error=event.is_error,
+                            )
+                            trace.append(_tool_result_draft(event))
             except asyncio.CancelledError:
                 logger.info("chat_stream_cancelled", session_id=str(session_id))
                 raise
@@ -275,6 +388,7 @@ class ChatService:
                 user_parts=dump_content_parts(user_parts),
                 assistant_parts=dump_content_parts(assistant_text_parts(content)),
                 assistant_message_id=assistant_message_id,
+                trace_messages=trace,
                 title=title,
                 source=source,
                 external_key=external_key,
@@ -320,6 +434,18 @@ class ChatService:
             logger.warning("chat_upstream_failed", error_type=type(exc).__name__)
             raise ChatUpstreamError("The language model could not complete the response.") from exc
         return response.text
+
+    async def _invoke_agent(self, messages: list[BaseMessage]) -> AgentResult:
+        agent = self._agent
+        if agent is None:
+            raise RuntimeError("No chat agent is configured.")
+        try:
+            return await agent.invoke(messages)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("chat_agent_failed", error_type=type(exc).__name__)
+            raise ChatUpstreamError("The language model could not complete the response.") from exc
 
     async def _resolve_title(
         self,
@@ -410,11 +536,24 @@ class ChatService:
                     messages.append(HumanMessage(content=preset.content))
                 else:
                     messages.append(AIMessage(content=preset.content))
-        for stored_message in history:
-            content = content_parts_for_model(stored_message.parts)
-            if stored_message.role == "user":
-                messages.append(HumanMessage(content=content))
-            else:
-                messages.append(AIMessage(content=content))
+        for stored_message in self._trim_history(history):
+            messages.append(_message_from_stored(stored_message))
         messages.append(HumanMessage(content=content_parts_for_model(parts)))
         return messages
+
+    @staticmethod
+    def _trim_history(history: list[ChatMessage]) -> list[ChatMessage]:
+        """Drop leading rows that would break the tool-call protocol.
+
+        A context window can start in the middle of a turn. Leading tool results,
+        or an assistant tool-call message whose results were cut off, cannot be
+        replayed to an OpenAI-compatible model, so skip them. A plain assistant
+        answer is safe to keep as the oldest message.
+        """
+
+        for index, message in enumerate(history):
+            if message.role == "user":
+                return history[index:]
+            if message.role == "assistant" and not _has_tool_calls(message):
+                return history[index:]
+        return []

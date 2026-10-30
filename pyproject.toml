@@ -10,6 +10,7 @@ dependencies = [
     "fastapi>=0.120,<1",
     "langchain-core>=1.0,<2",
     "langchain-openai>=1.0,<2",
+    "langchain[mcp]>=1.4,<2",
     "pydantic>=2.12,<3",
     "pydantic-settings>=2.12,<3",
     "qq-botpy==1.2.1",
@@ -58,6 +59,9 @@ addopts = "-q"
 asyncio_mode = "auto"
 pythonpath = ["."]
 testpaths = ["tests"]
+filterwarnings = [
+    "ignore::langchain_core._api.LangChainBetaWarning",
+]
 markers = [
     "integration: requires a PostgreSQL test database",
     "provider: calls the configured live LLM provider",

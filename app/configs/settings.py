@@ -43,9 +43,14 @@ class Settings(BaseSettings):
     chat_max_retries: int = Field(default=2, ge=0, le=10)
     chat_context_message_limit: int = Field(default=200, ge=1, le=1000)
 
+    mcp_enabled: bool = False
+    mcp_config_path: str = "mcp.json"
+    mcp_allowed_tools: str = ""
+
     qq_bot_enabled: bool = False
     qq_bot_app_id: str | None = None
     qq_bot_app_secret: SecretStr | None = None
+    qq_mcp_enabled: bool = True
 
     embedding_base_url: str | None = None
     embedding_api_key: SecretStr | None = None

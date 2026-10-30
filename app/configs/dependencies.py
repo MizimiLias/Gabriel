@@ -6,6 +6,7 @@ from fastapi import Depends, Request
 from langchain_core.language_models import BaseChatModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.configs.agent import get_chat_agent
 from app.configs.database import SessionFactory
 from app.configs.llm import get_chat_model
 from app.configs.settings import get_settings
@@ -34,7 +35,13 @@ async def get_chat_service(
 ) -> ChatService:
     """Assemble the request-scoped chat service."""
 
-    return ChatService(ChatRepository(db), model, get_settings(), PersonaRepository(db))
+    return ChatService(
+        ChatRepository(db),
+        model,
+        get_settings(),
+        PersonaRepository(db),
+        agent=get_chat_agent(),
+    )
 
 
 async def get_persona_service(

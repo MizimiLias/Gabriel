@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "weather": {
+      "command": "node",
+      "args": ["/home/cacc/Repositories/weather-mcp-server/dist/index.js"],
+      "env": { "AMAP_API_KEY": "replace-me" }
+    }
+  }
+}

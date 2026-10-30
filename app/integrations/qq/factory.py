@@ -3,6 +3,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from app.configs.agent import get_chat_agent
 from app.configs.database import SessionFactory
 from app.configs.llm import build_chat_model
 from app.configs.settings import Settings, get_settings
@@ -17,12 +18,17 @@ from app.services.chat_service import ChatService
 async def chat_service_scope() -> AsyncIterator[ChatService]:
     """Create a database-backed chat service for one inbound event."""
 
+    settings = get_settings()
+    # QQ is a public channel: operators can disable tool calling for it while
+    # keeping MCP tools available to the loopback-only Web API.
+    agent = get_chat_agent() if settings.qq_mcp_enabled else None
     async with SessionFactory() as session:
         yield ChatService(
             ChatRepository(session),
             build_chat_model(),
-            get_settings(),
+            settings,
             PersonaRepository(session),
+            agent=agent,
         )
 
 
